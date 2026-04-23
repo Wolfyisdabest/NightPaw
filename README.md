@@ -430,48 +430,78 @@ NightPaw includes a local release helper script for safe source snapshots:
 
 What it does:
 
-- requires a version like `v0.1.0`
+- defaults to an automatic release check when run with no arguments
 - refuses to run if the git working tree is dirty
-- creates an annotated git tag
+- checks commits, changed files, and changed lines since the latest tag
+- uses commit messages to choose an automatic version bump
+- creates an annotated git tag only after confirmation or `-Yes`
 - pushes that tag to `origin`
-- can optionally create a GitHub release if `gh` is installed
+- creates a GitHub release when `gh` is available
+- supports explicit scheduled/background mode through `-Scheduled`
 - keeps git tags simple and uses a version + date title for GitHub releases
-- supports an automatic recommendation mode based on changes since the latest tag
 
 Examples:
 
 ```powershell
-pwsh -File .\scripts\release.ps1 v0.1.0
-pwsh -File .\scripts\release.ps1 v0.1.0 -CreateGitHubRelease
-pwsh -File .\scripts\release.ps1 v1.0.0 -CreateGitHubRelease -ReleaseDate "24/04/2026"
-pwsh -File .\scripts\release.ps1 -Auto
-pwsh -File .\scripts\release.ps1 -Auto -Apply
-pwsh -File .\scripts\release.ps1 -Auto -CreateGitHubRelease
-pwsh -File .\scripts\release.ps1 -Auto -CreateGitHubRelease -Apply
+.\scripts\release.ps1
+.\scripts\release.ps1 -DryRun
+.\scripts\release.ps1 -Yes
+.\scripts\release.ps1 -Bump minor
+.\scripts\release.ps1 -Version v2.0.0
+.\scripts\release.ps1 -Scheduled
 ```
 
 Release modes:
 
-- Manual release
-  - creates the exact tag you provide
-- Auto recommendation dry-run
-  - checks changes since the latest tag
-  - proposes the next patch version
-  - prints whether a release is recommended
-  - does not create anything unless `-Apply` is used
-- Auto apply
-  - creates the proposed tag only when the script recommends a release
-  - use `-Force` only if you want to override a non-recommended result
-- GitHub release creation
-  - optional through `-CreateGitHubRelease`
-  - uses commit history since the latest tag as release notes when possible
-  - release title format is `NightPaw vX.Y.Z — dd/MM/yyyy`
-  - use `-ReleaseDate "dd/MM/yyyy"` to override the title date manually
+- Default run
+  - checks whether a release is recommended
+  - proposes a version automatically
+  - asks for confirmation before creating anything
+- `-DryRun`
+  - prints the report only
+  - never creates a tag or release
+- `-Yes`
+  - skips the confirmation prompt
+- `-Bump major|minor|patch`
+  - overrides the automatic bump choice
+- `-Version vX.Y.Z`
+  - overrides the automatic version entirely
+- `-ReleaseDate "dd/MM/yyyy"`
+  - overrides the GitHub release title date manually
+- `-Scheduled`
+  - explicit non-interactive mode for Task Scheduler or hidden/background runs
+  - never prompts
+  - only creates a release when the script recommends one
+  - exits cleanly when no release is recommended or when the working tree is dirty
 
 Important detail:
 
 - the date is only used in the GitHub release title
 - the git tag remains plain, for example `v1.0.0`
+- the script only checks when you run it manually
+- it does not monitor the repo automatically
+- scheduled mode is explicit because the script cannot reliably know whether Task Scheduler launched it hidden
+- commit messages influence automatic bumping:
+  - `BREAKING CHANGE`, `breaking:`, or `!:` -> major
+  - `feat:` -> minor
+  - `fix:`, `docs:`, `refactor:`, `chore:`, `style:`, `test:` -> patch
+
+Logging and scheduled use:
+
+- the helper writes to `logs/release-helper.log`
+- scheduled mode still prints normal output if visible, but also logs its decisions
+- if run hidden or with `-NonInteractive`, use `-Scheduled` so it never waits for input
+
+Recommended Task Scheduler PowerShell arguments:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -File "C:\Users\loene\OneDrive\discord\NightPaw\scripts\release.ps1" -Scheduled
+```
+
+Task Scheduler note:
+
+- your current NightPaw bot task uses a boot trigger with a 30 second delay and launches [start_nightpaw.bat](/C:/Users/loene/OneDrive/discord/NightPaw/start_nightpaw.bat)
+- for scheduled release checks, use a separate task that calls `pwsh` directly with `-Scheduled`
 
 These releases are source snapshots and milestones. They are not backups of `.env`, `data/`, logs, archives, or other ignored runtime files.
 
