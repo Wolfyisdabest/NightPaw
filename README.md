@@ -422,6 +422,50 @@ Recommended use:
 - use GitHub as source storage and change history
 - keep local runtime data on the machine that runs the bot
 
+## Creating Releases
+
+NightPaw includes a local release helper script for safe source snapshots:
+
+- [scripts/release.ps1](/C:/Users/loene/OneDrive/discord/NightPaw/scripts/release.ps1)
+
+What it does:
+
+- requires a version like `v0.1.0`
+- refuses to run if the git working tree is dirty
+- creates an annotated git tag
+- pushes that tag to `origin`
+- can optionally create a GitHub release if `gh` is installed
+- supports an automatic recommendation mode based on changes since the latest tag
+
+Examples:
+
+```powershell
+pwsh -File .\scripts\release.ps1 v0.1.0
+pwsh -File .\scripts\release.ps1 v0.1.0 -CreateGitHubRelease
+pwsh -File .\scripts\release.ps1 -Auto
+pwsh -File .\scripts\release.ps1 -Auto -Apply
+pwsh -File .\scripts\release.ps1 -Auto -CreateGitHubRelease
+pwsh -File .\scripts\release.ps1 -Auto -CreateGitHubRelease -Apply
+```
+
+Release modes:
+
+- Manual release
+  - creates the exact tag you provide
+- Auto recommendation dry-run
+  - checks changes since the latest tag
+  - proposes the next patch version
+  - prints whether a release is recommended
+  - does not create anything unless `-Apply` is used
+- Auto apply
+  - creates the proposed tag only when the script recommends a release
+  - use `-Force` only if you want to override a non-recommended result
+- GitHub release creation
+  - optional through `-CreateGitHubRelease`
+  - uses commit history since the latest tag as release notes when possible
+
+These releases are source snapshots and milestones. They are not backups of `.env`, `data/`, logs, archives, or other ignored runtime files.
+
 ## Recommended First Checks After Setup
 
 1. Run `uv sync`
