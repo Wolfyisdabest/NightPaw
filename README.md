@@ -435,6 +435,7 @@ What it does:
 - creates an annotated git tag
 - pushes that tag to `origin`
 - can optionally create a GitHub release if `gh` is installed
+- keeps git tags simple and uses a version + date title for GitHub releases
 - supports an automatic recommendation mode based on changes since the latest tag
 
 Examples:
@@ -442,6 +443,7 @@ Examples:
 ```powershell
 pwsh -File .\scripts\release.ps1 v0.1.0
 pwsh -File .\scripts\release.ps1 v0.1.0 -CreateGitHubRelease
+pwsh -File .\scripts\release.ps1 v1.0.0 -CreateGitHubRelease -ReleaseDate "24/04/2026"
 pwsh -File .\scripts\release.ps1 -Auto
 pwsh -File .\scripts\release.ps1 -Auto -Apply
 pwsh -File .\scripts\release.ps1 -Auto -CreateGitHubRelease
@@ -463,6 +465,13 @@ Release modes:
 - GitHub release creation
   - optional through `-CreateGitHubRelease`
   - uses commit history since the latest tag as release notes when possible
+  - release title format is `NightPaw vX.Y.Z — dd/MM/yyyy`
+  - use `-ReleaseDate "dd/MM/yyyy"` to override the title date manually
+
+Important detail:
+
+- the date is only used in the GitHub release title
+- the git tag remains plain, for example `v1.0.0`
 
 These releases are source snapshots and milestones. They are not backups of `.env`, `data/`, logs, archives, or other ignored runtime files.
 

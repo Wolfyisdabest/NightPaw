@@ -6,7 +6,8 @@ param(
     [switch]$Auto,
     [switch]$Apply,
     [switch]$Force,
-    [switch]$CreateGitHubRelease
+    [switch]$CreateGitHubRelease,
+    [string]$ReleaseDate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -99,6 +100,25 @@ function Assert-TagDoesNotExist([string]$Tag) {
     }
 }
 
+function Get-ReleaseDateText([string]$Override) {
+    if ([string]::IsNullOrWhiteSpace($Override)) {
+        return (Get-Date).ToString('dd/MM/yyyy')
+    }
+
+    $parsed = $null
+    $formats = @('dd/MM/yyyy')
+    if (-not [datetime]::TryParseExact(
+        $Override,
+        $formats,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::None,
+        [ref]$parsed
+    )) {
+        Fail "ReleaseDate must use dd/MM/yyyy format, for example 24/04/2026."
+    }
+    return $parsed.ToString('dd/MM/yyyy')
+}
+
 function Get-ComparisonBase([string]$LatestTag) {
     if ([string]::IsNullOrWhiteSpace($LatestTag)) {
         return $EmptyTreeHash
@@ -186,7 +206,7 @@ function Get-ReleaseNotes([string]$BaseRef, [string]$LatestTag) {
     return @($lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
-function New-Release([string]$Tag, [switch]$CreateGitHubRelease, [string[]]$ReleaseNotes) {
+function New-Release([string]$Tag, [switch]$CreateGitHubRelease, [string[]]$ReleaseNotes, [string]$ReleaseDateText) {
     $headCommit = (Invoke-GitCapture @('rev-parse', '--short', 'HEAD') | Select-Object -First 1).Trim()
     Write-Host "Creating annotated tag $Tag on commit $headCommit..."
     Invoke-GitStreaming @('tag', '-a', $Tag, '-m', "NightPaw $Tag")
@@ -224,7 +244,7 @@ function New-Release([string]$Tag, [switch]$CreateGitHubRelease, [string[]]$Rele
         }
 
         Write-Host "Creating GitHub release $Tag..."
-        & $gh.Source release create $Tag --verify-tag --title "NightPaw $Tag" --notes-file $notesFile
+        & $gh.Source release create $Tag --verify-tag --title "NightPaw $Tag — $ReleaseDateText" --notes-file $notesFile
         if ($LASTEXITCODE -ne 0) {
             Fail "gh release create failed."
         }
@@ -253,6 +273,7 @@ $baseRef = Get-ComparisonBase $latestTag
 $stats = Get-ReleaseStats -BaseRef $baseRef -LatestTag $latestTag
 $recommendation = Get-Recommendation $stats
 $releaseNotes = Get-ReleaseNotes -BaseRef $baseRef -LatestTag $latestTag
+$releaseDateText = Get-ReleaseDateText $ReleaseDate
 
 if (-not [string]::IsNullOrWhiteSpace($Version)) {
     Assert-ValidVersion $Version
@@ -303,9 +324,9 @@ if ($Auto) {
         Fail "Auto mode did not recommend a release. Re-run with -Force if you still want to create $proposedVersion."
     }
 
-    New-Release -Tag $proposedVersion -CreateGitHubRelease:$CreateGitHubRelease -ReleaseNotes $releaseNotes
+    New-Release -Tag $proposedVersion -CreateGitHubRelease:$CreateGitHubRelease -ReleaseNotes $releaseNotes -ReleaseDateText $releaseDateText
     exit 0
 }
 
 Assert-TagDoesNotExist $Version
-New-Release -Tag $Version -CreateGitHubRelease:$CreateGitHubRelease -ReleaseNotes $releaseNotes
+New-Release -Tag $Version -CreateGitHubRelease:$CreateGitHubRelease -ReleaseNotes $releaseNotes -ReleaseDateText $releaseDateText
