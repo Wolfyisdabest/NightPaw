@@ -22,15 +22,16 @@ $ImportantPaths = @(
     'main.py',
     'config.py',
     'checks.py',
+    '.gitignore',
+    'README.md',
     'pyproject.toml',
     'uv.lock',
-    'services/ai_service.py',
-    'services/ai_state.py',
-    'services/runtime_intelligence.py',
-    'cogs/ai.py',
-    'cogs/sysadmin.py',
-    'cogs/moderation.py',
-    'cogs/automod.py'
+    'scripts/release.ps1'
+)
+
+$ImportantPathPatterns = @(
+    'cogs/*.py',
+    'services/*.py'
 )
 $EmptyTreeHash = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 
@@ -161,6 +162,18 @@ function Assert-SemVerTag([string]$Tag, [string]$Label = 'tag') {
     }
 }
 
+function Test-IsImportantPath([string]$Path) {
+    if ($ImportantPaths -contains $Path) {
+        return $true
+    }
+    foreach ($pattern in $ImportantPathPatterns) {
+        if ($Path -like $pattern) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Get-LatestReachableTag {
     $tag = & git describe --tags --abbrev=0 2>$null
     if ($LASTEXITCODE -ne 0) {
@@ -265,7 +278,7 @@ function Get-ReleaseStats([string]$BaseRef, [string]$LatestTag) {
         $changedPaths.Add($parts[2])
     }
 
-    $importantChanged = @($changedPaths | Where-Object { $ImportantPaths -contains $_ } | Sort-Object -Unique)
+    $importantChanged = @($changedPaths | Where-Object { Test-IsImportantPath $_ } | Sort-Object -Unique)
     $diffStatLines = @(
         Invoke-GitCapture @('diff', '--stat', "$BaseRef..HEAD") |
         Where-Object { -not [string]::IsNullOrWhiteSpace(($_ | Out-String).Trim()) }
