@@ -156,7 +156,7 @@ function Get-NextVersion([string]$LatestTag, [string]$BumpType) {
 }
 
 function Assert-TagDoesNotExist([string]$Tag) {
-    $existing = Invoke-GitCapture tag --list $Tag
+    $existing = Invoke-GitCapture @('tag', '--list', $Tag)
     if (-not [string]::IsNullOrWhiteSpace(($existing | Out-String))) {
         Fail "Tag $Tag already exists."
     }
@@ -164,15 +164,15 @@ function Assert-TagDoesNotExist([string]$Tag) {
 
 function Get-ReleaseStats([string]$BaseRef, [string]$LatestTag) {
     $logFormat = '%H%x09%s'
-    $commitMeta = Invoke-GitCapture log --format=$logFormat "$BaseRef..HEAD"
+    $commitMeta = Invoke-GitCapture @('log', "--format=$logFormat", "$BaseRef..HEAD")
     $commitCount = @($commitMeta | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
 
     if ([string]::IsNullOrWhiteSpace($LatestTag)) {
-        $commitCount = [int](Invoke-GitCapture rev-list --count HEAD | Select-Object -First 1)
-        $commitMeta = Invoke-GitCapture log --format=$logFormat --reverse HEAD
+        $commitCount = [int](Invoke-GitCapture @('rev-list', '--count', 'HEAD') | Select-Object -First 1)
+        $commitMeta = Invoke-GitCapture @('log', "--format=$logFormat", '--reverse', 'HEAD')
     }
 
-    $numstatLines = Invoke-GitCapture diff --numstat "$BaseRef..HEAD"
+    $numstatLines = Invoke-GitCapture @('diff', '--numstat', "$BaseRef..HEAD")
     $changedFiles = 0
     $inserted = 0
     $deleted = 0
@@ -208,7 +208,7 @@ function Get-ReleaseStats([string]$BaseRef, [string]$LatestTag) {
         $parts = $text -split "`t", 2
         if ($parts.Count -eq 2) {
             $messages.Add($parts[1])
-            $short = (Invoke-GitCapture rev-parse --short $parts[0] | Select-Object -First 1).Trim()
+            $short = (Invoke-GitCapture @('rev-parse', '--short', $parts[0]) | Select-Object -First 1).Trim()
             $logLines.Add("$short $($parts[1])")
         }
     }
@@ -344,18 +344,18 @@ function Confirm-Release([string]$ReleaseTitle) {
         Write-ReleaseLog -Level 'WARN' -Message "prompt required but input is unavailable; exiting without creating release"
         exit 0
     }
-    $answer = Read-Host "Create GitHub release $ReleaseTitle? [y/N]"
+    $answer = Read-Host ("Create GitHub release {0}? [y/N]" -f $ReleaseTitle)
     return ($answer -match '^(y|yes)$')
 }
 
 function New-Release([string]$Tag, [string]$ReleaseTitle, [string[]]$ReleaseNotes) {
-    $headCommit = (Invoke-GitCapture rev-parse --short HEAD | Select-Object -First 1).Trim()
+    $headCommit = (Invoke-GitCapture @('rev-parse', '--short', 'HEAD') | Select-Object -First 1).Trim()
     Write-ReleaseLog -Level 'INFO' -Message "tag_creation_started tag=$Tag commit=$headCommit"
-    Invoke-GitStreaming tag -a $Tag -m "NightPaw $Tag"
+    Invoke-GitStreaming @('tag', '-a', $Tag, '-m', "NightPaw $Tag")
     Write-ReleaseLog -Level 'INFO' -Message "tag_creation_result=success tag=$Tag"
 
     Write-ReleaseLog -Level 'INFO' -Message "tag_push_started tag=$Tag remote=origin"
-    Invoke-GitStreaming push origin $Tag
+    Invoke-GitStreaming @('push', 'origin', $Tag)
     Write-ReleaseLog -Level 'INFO' -Message "tag_push_result=success tag=$Tag"
 
     $gh = Get-Command gh -ErrorAction SilentlyContinue
@@ -395,7 +395,7 @@ if ($Scheduled -and $Force) {
     exit 0
 }
 
-$status = Invoke-GitCapture status --porcelain
+$status = Invoke-GitCapture @('status', '--porcelain')
 if (-not [string]::IsNullOrWhiteSpace(($status | Out-String))) {
     $dirtyMessage = 'working tree is dirty'
     if ($Scheduled) {
