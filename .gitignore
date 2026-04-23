@@ -1,0 +1,46 @@
+# Python cache / build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.py,cover
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local secrets / environment
+.env
+.env.local
+.env.*.local
+
+# Editor / OS-local files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Runtime logs
+nightpaw.log
+*.log
+
+# Runtime databases / state
+data/nightpaw.db
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/command_sync_state.json
+data/startup_snapshot.json
+
+# Local archives / backups
+*.7z
+*.zip
+*.rar
+data/trust_backup.json
