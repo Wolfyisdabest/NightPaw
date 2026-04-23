@@ -444,7 +444,11 @@ Examples:
 
 ```powershell
 .\scripts\release.ps1
+.\scripts\release.ps1 -ShowCommits
+.\scripts\release.ps1 -ShowFiles
+.\scripts\release.ps1 -ShowCommits -ShowFiles
 .\scripts\release.ps1 -DryRun
+.\scripts\release.ps1 -DryRun -ShowCommits -ShowFiles
 .\scripts\release.ps1 -Yes
 .\scripts\release.ps1 -Bump minor
 .\scripts\release.ps1 -Version v2.0.0
@@ -460,6 +464,10 @@ Release modes:
 - `-DryRun`
   - prints the report only
   - never creates a tag or release
+- `-ShowCommits`
+  - shows the commits included since the latest tag
+- `-ShowFiles`
+  - shows a readable git diff/stat summary for the release range
 - `-Yes`
   - skips the confirmation prompt
 - `-Bump major|minor|patch`
@@ -489,6 +497,7 @@ Important detail:
 Logging and scheduled use:
 
 - the helper writes to `logs/release-helper.log`
+- console output is kept cleaner for manual use, while detailed timestamped lines stay in the log file
 - scheduled mode still prints normal output if visible, but also logs its decisions
 - if run hidden or with `-NonInteractive`, use `-Scheduled` so it never waits for input
 
