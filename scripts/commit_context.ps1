@@ -189,6 +189,10 @@ function Get-SuggestedCommitType {
         [string[]]$CommitText
     )
 
+    if (-not $ChangedPaths -or $ChangedPaths.Count -eq 0) {
+        return 'none'
+    }
+
     $joinedText = (($CommitText -join "`n") + "`n" + ($ChangedPaths -join "`n")).ToLowerInvariant()
     $hasCogChange = @($ChangedPaths | Where-Object { $_ -like 'cogs/*.py' }).Count -gt 0
     $hasCodeChange = @($ChangedPaths | Where-Object { $_ -like '*.py' }).Count -gt 0
