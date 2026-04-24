@@ -514,6 +514,23 @@ Task Scheduler note:
 
 These releases are source snapshots and milestones. They are not backups of `.env`, `data/`, logs, archives, or other ignored runtime files.
 
+## Dev Helper
+
+Usage:
+
+```powershell
+.\scripts\dev.ps1
+```
+
+This opens a small local menu for common NightPaw development tasks:
+
+- show commit context
+- commit changes
+- dry-run a release
+- run a release
+- show release help
+- show git status
+
 ## Recommended First Checks After Setup
 
 1. Run `uv sync`

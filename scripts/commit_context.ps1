@@ -341,6 +341,13 @@ try {
     Write-Host '' -ForegroundColor Gray
     Write-Host 'Suggested commit type:' -ForegroundColor Gray
     Write-Host $commitHint -ForegroundColor Gray
+    Write-Host '' -ForegroundColor Gray
+    Write-Host 'Task:' -ForegroundColor Gray
+    Write-Host 'Suggest:' -ForegroundColor Gray
+    Write-Host '1. commit type' -ForegroundColor Gray
+    Write-Host '2. commit message' -ForegroundColor Gray
+    Write-Host '3. whether this deserves a release' -ForegroundColor Gray
+    Write-Host '4. any obvious risk in the change' -ForegroundColor Gray
     Write-Host '```' -ForegroundColor DarkGray
 }
 catch {
