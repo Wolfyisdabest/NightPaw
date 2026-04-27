@@ -4,6 +4,12 @@ NightPaw is a local-first Discord bot built around `discord.py`, SQLite, and Oll
 
 This project is built for a private or controlled rollout first. It has owner tooling, server control tooling, persistent local state, and an AI system that is tuned for local use rather than hosted API usage.
 
+## Legal
+
+- [Terms of Service](./docs/legal/terms-of-service.md)
+- [Privacy Policy](./docs/legal/privacy-policy.md)
+- [Legal publishing notes](./docs/legal/README.md)
+
 ## Current State
 
 - Local-first runtime
@@ -35,7 +41,7 @@ This project is built for a private or controlled rollout first. It has owner to
 
 ## Dependencies
 
-Declared in [pyproject.toml](/C:/Users/loene/OneDrive/discord/NightPaw/pyproject.toml):
+Declared in [pyproject.toml](./pyproject.toml):
 
 - `discord-py[voice]`
 - `python-dotenv`
@@ -88,13 +94,13 @@ uv run main.py
 
 ## Windows Startup
 
-You can use [start_nightpaw.bat](/C:/Users/loene/OneDrive/discord/NightPaw/start_nightpaw.bat) with Task Scheduler.
+You can use [start_nightpaw.bat](./start_nightpaw.bat) with Task Scheduler.
 
 Example batch file:
 
 ```bat
 @echo off
-cd /d "C:\Users\loene\OneDrive\discord\NightPaw"
+cd /d "%~dp0"
 uv run main.py
 ```
 
@@ -172,10 +178,10 @@ This affects help output, AI action routing, and command visibility.
 
 Main AI behavior lives in:
 
-- [cogs/ai.py](/C:/Users/loene/OneDrive/discord/NightPaw/cogs/ai.py)
-- [services/ai_service.py](/C:/Users/loene/OneDrive/discord/NightPaw/services/ai_service.py)
-- [services/runtime_intelligence.py](/C:/Users/loene/OneDrive/discord/NightPaw/services/runtime_intelligence.py)
-- [services/ai_state.py](/C:/Users/loene/OneDrive/discord/NightPaw/services/ai_state.py)
+- [cogs/ai.py](./cogs/ai.py)
+- [services/ai_service.py](./services/ai_service.py)
+- [services/runtime_intelligence.py](./services/runtime_intelligence.py)
+- [services/ai_state.py](./services/ai_state.py)
 
 Current AI capabilities include:
 
@@ -228,7 +234,7 @@ It is generated from live loaded commands rather than a static command list.
 
 ### Moderation and AutoMod
 
-Moderation commands in [cogs/moderation.py](/C:/Users/loene/OneDrive/discord/NightPaw/cogs/moderation.py):
+Moderation commands in [cogs/moderation.py](./cogs/moderation.py):
 
 - `kick`
 - `ban`
@@ -243,7 +249,7 @@ Moderation commands in [cogs/moderation.py](/C:/Users/loene/OneDrive/discord/Nig
 - `removerole`
 - `userinfo`
 
-AutoMod in [cogs/automod.py](/C:/Users/loene/OneDrive/discord/NightPaw/cogs/automod.py):
+AutoMod in [cogs/automod.py](./cogs/automod.py):
 
 - invite link blocking
 - mass mention detection
@@ -275,7 +281,7 @@ Trusted users affect:
 
 ### Utility / Daily Use
 
-In [cogs/utility.py](/C:/Users/loene/OneDrive/discord/NightPaw/cogs/utility.py):
+In [cogs/utility.py](./cogs/utility.py):
 
 - `status`
 - `remind`
@@ -294,7 +300,7 @@ Reminders persist across restarts and are restored on boot.
 
 ### Owner / System Control
 
-In [cogs/sysadmin.py](/C:/Users/loene/OneDrive/discord/NightPaw/cogs/sysadmin.py):
+In [cogs/sysadmin.py](./cogs/sysadmin.py):
 
 - `sysinfo`
 - `ls`
@@ -325,7 +331,7 @@ And slash custom mode uses an interactive permission UI.
 
 ### Cog Management
 
-In [cogs/cogmanager.py](/C:/Users/loene/OneDrive/discord/NightPaw/cogs/cogmanager.py):
+In [cogs/cogmanager.py](./cogs/cogmanager.py):
 
 - `cogload`
 - `cogunload`
@@ -340,11 +346,11 @@ NightPaw supports live cog loading and reloading without a full process restart.
 
 Lore and profile cogs:
 
-- [cogs/lore.py](/C:/Users/loene/OneDrive/discord/NightPaw/cogs/lore.py)
-- [cogs/wolf_lore.py](/C:/Users/loene/OneDrive/discord/NightPaw/cogs/wolf_lore.py)
-- [cogs/kael.py](/C:/Users/loene/OneDrive/discord/NightPaw/cogs/kael.py)
-- [cogs/blaze.py](/C:/Users/loene/OneDrive/discord/NightPaw/cogs/blaze.py)
-- [cogs/matthijs.py](/C:/Users/loene/OneDrive/discord/NightPaw/cogs/matthijs.py)
+- [cogs/lore.py](./cogs/lore.py)
+- [cogs/wolf_lore.py](./cogs/wolf_lore.py)
+- [cogs/kael.py](./cogs/kael.py)
+- [cogs/blaze.py](./cogs/blaze.py)
+- [cogs/matthijs.py](./cogs/matthijs.py)
 
 These cover:
 
@@ -426,7 +432,7 @@ Recommended use:
 
 NightPaw includes a local release helper script for safe source snapshots:
 
-- [scripts/release.ps1](/C:/Users/loene/OneDrive/discord/NightPaw/scripts/release.ps1)
+- [scripts/release.ps1](./scripts/release.ps1)
 
 What it does:
 
@@ -504,12 +510,12 @@ Logging and scheduled use:
 Recommended Task Scheduler PowerShell arguments:
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -File "C:\Users\loene\OneDrive\discord\NightPaw\scripts\release.ps1" -Scheduled
+pwsh -NoProfile -ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -File ".\scripts\release.ps1" -Scheduled
 ```
 
 Task Scheduler note:
 
-- your current NightPaw bot task uses a boot trigger with a 30 second delay and launches [start_nightpaw.bat](/C:/Users/loene/OneDrive/discord/NightPaw/start_nightpaw.bat)
+- your current NightPaw bot task uses a boot trigger with a 30 second delay and launches [start_nightpaw.bat](./start_nightpaw.bat)
 - for scheduled release checks, use a separate task that calls `pwsh` directly with `-Scheduled`
 
 These releases are source snapshots and milestones. They are not backups of `.env`, `data/`, logs, archives, or other ignored runtime files.
@@ -545,6 +551,6 @@ This opens a small local menu for common NightPaw development tasks:
 
 This README is meant to describe the bot as it exists now, not to document every historical version. If behavior changes, the best sources of truth are:
 
-- [main.py](/C:/Users/loene/OneDrive/discord/NightPaw/main.py)
-- [cogs](/C:/Users/loene/OneDrive/discord/NightPaw/cogs)
-- [services](/C:/Users/loene/OneDrive/discord/NightPaw/services)
+- [main.py](./main.py)
+- [cogs](./cogs/)
+- [services](./services/)
