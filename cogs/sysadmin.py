@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 import os
 import platform
@@ -381,6 +382,161 @@ class Sysadmin(commands.Cog):
         embed.set_footer(text="NightPaw Sysadmin")
         return embed
 
+    def _code_language_for_path(self, path: Path) -> str:
+        return {
+            ".py": "py",
+            ".ps1": "powershell",
+            ".bat": "bat",
+            ".cmd": "bat",
+            ".json": "json",
+            ".toml": "toml",
+            ".md": "md",
+            ".yml": "yaml",
+            ".yaml": "yaml",
+            ".txt": "text",
+            ".sql": "sql",
+        }.get(path.suffix.lower(), "")
+
+    def _python_symbol_summary(self, content: str) -> list[str]:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return []
+
+        classes: list[str] = []
+        functions: list[str] = []
+        async_functions: list[str] = []
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                classes.append(node.name)
+            elif isinstance(node, ast.AsyncFunctionDef):
+                async_functions.append(node.name)
+            elif isinstance(node, ast.FunctionDef):
+                functions.append(node.name)
+
+        lines: list[str] = []
+        if classes:
+            lines.append("Classes: " + ", ".join(f"`{name}`" for name in classes[:8]))
+        if functions:
+            lines.append("Functions: " + ", ".join(f"`{name}`" for name in functions[:8]))
+        if async_functions:
+            lines.append("Async: " + ", ".join(f"`{name}`" for name in async_functions[:8]))
+        return lines
+
+    def _resolve_path_and_query(self, raw: str) -> tuple[Path, str | None]:
+        normalized = (raw or ".").strip()
+        direct = Path(normalized)
+        if direct.exists():
+            return direct, None
+
+        parts = normalized.split()
+        for index in range(len(parts) - 1, 0, -1):
+            candidate = Path(" ".join(parts[:index]))
+            if candidate.exists():
+                query = " ".join(parts[index:]).strip() or None
+                return candidate, query
+        return direct, None
+
+    def _python_symbol_preview(self, file_path: Path, content: str, query: str) -> dict[str, object] | None:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return None
+
+        query_key = query.strip()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == query_key:
+                start = max((node.lineno or 1) - 1, 0)
+                end = node.end_lineno or node.lineno or start + 1
+                lines = content.splitlines()
+                snippet = "\n".join(lines[start:end])
+                symbol_type = "Class" if isinstance(node, ast.ClassDef) else "Async Function" if isinstance(node, ast.AsyncFunctionDef) else "Function"
+                nested = []
+                for child in getattr(node, "body", []):
+                    if isinstance(child, ast.ClassDef):
+                        nested.append(f"class `{child.name}`")
+                    elif isinstance(child, ast.AsyncFunctionDef):
+                        nested.append(f"async `{child.name}`")
+                    elif isinstance(child, ast.FunctionDef):
+                        nested.append(f"function `{child.name}`")
+                signature = lines[start].strip() if start < len(lines) else node.name
+                return {
+                    "type": symbol_type,
+                    "snippet": snippet,
+                    "start_line": node.lineno or 1,
+                    "end_line": end,
+                    "nested": nested,
+                    "signature": signature,
+                }
+        return None
+
+    def _file_preview_embed(self, path: str, *, title_prefix: str = "📄", query: str | None = None) -> discord.Embed:
+        blocked = [".env", "token", "password", "secret", "nightpaw.db"]
+        if any(b in path.lower() for b in blocked):
+            return discord.Embed(description=wolf_wrap("That file is off limits."), color=config.BOT_COLOR)
+
+        file_path = Path(path)
+        try:
+            full_content = file_path.read_text(encoding="utf-8")
+            content = full_content
+            truncated = False
+            footer_text = None
+            title = f"{title_prefix} {file_path.name}"
+            symbol_preview: dict[str, object] | None = None
+            if query and file_path.suffix.lower() == ".py":
+                symbol_preview = self._python_symbol_preview(file_path, full_content, query)
+                if symbol_preview is not None:
+                    symbol_type = str(symbol_preview["type"])
+                    symbol_content = str(symbol_preview["snippet"])
+                    content = symbol_content
+                    title = f"{title_prefix} {file_path.name}::{query}"
+                    footer_text = f"{symbol_type} preview for `{query}`."
+                else:
+                    footer_text = f"Symbol `{query}` not found. Showing file preview instead."
+
+            if len(content) > 1800:
+                content = content[:1800]
+                truncated = True
+
+            language = self._code_language_for_path(file_path)
+            safe_content = content.replace("```", "'''")
+            embed = discord.Embed(
+                title=title,
+                description=f"```{language}\n{safe_content}\n```",
+                color=config.BOT_COLOR,
+            )
+            embed.add_field(name="Path", value=f"`{file_path.resolve()}`", inline=False)
+            if file_path.suffix.lower() == ".py":
+                symbol_lines = self._python_symbol_summary(full_content)
+                if symbol_lines:
+                    embed.add_field(name="Structure", value="\n".join(symbol_lines), inline=False)
+                if query and symbol_preview is not None:
+                    embed.add_field(
+                        name="Symbol",
+                        value=(
+                            f"Kind: `{symbol_preview['type']}`\n"
+                            f"Lines: `{symbol_preview['start_line']}-{symbol_preview['end_line']}`\n"
+                            f"Signature: `{symbol_preview['signature']}`"
+                        ),
+                        inline=False,
+                    )
+                    nested = symbol_preview.get("nested") or []
+                    if nested:
+                        embed.add_field(name="Nested", value=", ".join(nested[:8]), inline=False)
+            if truncated and footer_text:
+                embed.set_footer(text=f"{footer_text} Preview truncated to first 1800 characters.")
+            elif truncated:
+                embed.set_footer(text="Preview truncated to first 1800 characters.")
+            elif footer_text:
+                embed.set_footer(text=footer_text)
+            return embed
+        except PermissionError:
+            return discord.Embed(description=wolf_wrap("Permission denied."), color=config.BOT_COLOR)
+        except FileNotFoundError:
+            return discord.Embed(description=wolf_wrap(f"File not found: `{path}`"), color=config.BOT_COLOR)
+        except UnicodeDecodeError:
+            return discord.Embed(description=wolf_wrap("Can't read binary file as text."), color=config.BOT_COLOR)
+
     @commands.command(name="sysinfo", help="Show system info (Owner DM only)")
     @is_owner_dm_only()
     async def sysinfo_prefix(self, ctx):
@@ -394,16 +550,19 @@ class Sysadmin(commands.Cog):
         await interaction.response.send_message(embed=self._sysinfo_embed(), ephemeral=ephemeral)
 
     def _ls_embed(self, path: str) -> discord.Embed:
+        target, query = self._resolve_path_and_query(path)
         try:
-            entries = os.listdir(path)
-            dirs = [f"📁 {e}" for e in entries if os.path.isdir(os.path.join(path, e))]
-            files = [f"📄 {e}" for e in entries if os.path.isfile(os.path.join(path, e))]
+            if target.is_file():
+                return self._file_preview_embed(str(target), title_prefix="📄", query=query)
+            entries = os.listdir(target)
+            dirs = [f"📁 {e}" for e in entries if os.path.isdir(os.path.join(target, e))]
+            files = [f"📄 {e}" for e in entries if os.path.isfile(os.path.join(target, e))]
             all_entries = dirs + files
             display = "\n".join(all_entries[:30]) or "Empty directory."
             if len(all_entries) > 30:
                 display += f"\n... and {len(all_entries) - 30} more"
             embed = discord.Embed(
-                title=f"📂 {os.path.abspath(path)}",
+                title=f"📂 {target.resolve()}",
                 description=f"```\n{display}\n```",
                 color=config.BOT_COLOR,
             )
@@ -411,6 +570,8 @@ class Sysadmin(commands.Cog):
             embed = discord.Embed(description=wolf_wrap("Permission denied."), color=config.BOT_COLOR)
         except FileNotFoundError:
             embed = discord.Embed(description=wolf_wrap(f"Path not found: `{path}`"), color=config.BOT_COLOR)
+        except NotADirectoryError:
+            embed = self._file_preview_embed(str(target), title_prefix="📄", query=query)
         return embed
 
     @commands.command(name="ls", help="List directory contents (Owner DM only)")
@@ -426,25 +587,7 @@ class Sysadmin(commands.Cog):
         await interaction.response.send_message(embed=self._ls_embed(path), ephemeral=ephemeral)
 
     def _readfile_embed(self, path: str) -> discord.Embed:
-        blocked = [".env", "token", "password", "secret", "nightpaw.db"]
-        if any(b in path.lower() for b in blocked):
-            return discord.Embed(description=wolf_wrap("That file is off limits."), color=config.BOT_COLOR)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read(1800)
-                truncated = bool(f.read(1))
-            embed = discord.Embed(
-                title=f"📄 {os.path.basename(path)}",
-                description=f"```\n{content}\n```" + ("\n_Truncated to first 1800 characters._" if truncated else ""),
-                color=config.BOT_COLOR,
-            )
-        except PermissionError:
-            embed = discord.Embed(description=wolf_wrap("Permission denied."), color=config.BOT_COLOR)
-        except FileNotFoundError:
-            embed = discord.Embed(description=wolf_wrap(f"File not found: `{path}`"), color=config.BOT_COLOR)
-        except UnicodeDecodeError:
-            embed = discord.Embed(description=wolf_wrap("Can't read binary file as text."), color=config.BOT_COLOR)
-        return embed
+        return self._file_preview_embed(path, title_prefix="📄")
 
     @commands.command(name="readfile", help="Read a text file (Owner DM only)")
     @is_owner_dm_only()
