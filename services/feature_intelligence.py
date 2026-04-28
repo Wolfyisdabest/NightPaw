@@ -7,6 +7,8 @@ import inspect
 import discord
 from discord.ext import commands
 
+from services.rust_bridge import normalize_message
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -86,10 +88,8 @@ def infer_command_category(
         help_text = str(getattr(slash_cmd, "description", "") or "")
         command_name = slash_cmd.name
 
-    lower_help = help_text.casefold()
-    lower_checks = " ".join(checks).casefold()
     lower_name = command_name.casefold()
-    combined = f"{lower_name} {lower_help} {lower_checks}".strip()
+    combined = normalize_message(f"{command_name} {help_text} {' '.join(checks)}")
 
     admin_names = {
         "aisetchannel", "aiclearchannel", "aienable", "aidisable", "aimentions",
@@ -138,7 +138,7 @@ def infer_command_section(
         parent = getattr(slash_cmd, "binding", None)
         cog_name = str(parent.__class__.__name__ if parent is not None else "").casefold()
 
-    combined = f"{command_name} {module_name} {cog_name}"
+    combined = normalize_message(f"{command_name} {module_name} {cog_name}")
     if any(token in combined for token in ("cogs.ai", " ai ", "ai.")) or command_name.startswith("ai"):
         if infer_command_category(prefix_cmd=prefix_cmd, slash_cmd=slash_cmd) == "serveradmin":
             return "serveradmin"

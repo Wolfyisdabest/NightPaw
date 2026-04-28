@@ -1,0 +1,12 @@
+[package]
+name = "nightpaw_rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "nightpaw_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+unicode-normalization = "0.1"

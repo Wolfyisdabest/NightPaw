@@ -10,6 +10,7 @@ import config
 from services.ai_media import AttachmentBatch, describe_attachment_capability
 from services.ai_state import get_history, get_memories, get_recent_channel_messages, get_user_note
 from services.feature_intelligence import build_feature_snapshot
+from services.rust_bridge import normalize_message
 from services.trust_service import is_trusted_user, list_trusted
 from services.db import connect
 
@@ -93,7 +94,7 @@ QUESTIONS_COMMAND_ABILITY = (
 
 
 def _normalize(text: str) -> str:
-    return " ".join(text.casefold().split())
+    return normalize_message(text)
 
 
 def _base_model_identity(model_name: str) -> str:

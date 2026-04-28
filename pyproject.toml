@@ -10,3 +10,12 @@ dependencies = [
     "psutil>=7.2.2",
     "ephem>=4.2.1",
 ]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.7,<2",
+    "pytest>=8.3,<9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

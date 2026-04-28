@@ -10,6 +10,14 @@ This project is built for a private or controlled rollout first. It has owner to
 - [Privacy Policy](./docs/legal/privacy-policy.md)
 - [Legal publishing notes](./docs/legal/README.md)
 
+## License
+
+NightPaw is licensed under the GNU Affero General Public License v3.0.
+
+If you modify and run NightPaw as a public or hosted bot/service, you must make the corresponding source code available under the same license.
+
+See [LICENSE](./LICENSE) for the full official license text.
+
 ## Current State
 
 - Local-first runtime
@@ -49,6 +57,11 @@ Declared in [pyproject.toml](./pyproject.toml):
 - `aiohttp`
 - `psutil`
 - `ephem`
+
+Development helpers:
+
+- `pytest`
+- `maturin`
 
 ## Setup
 
@@ -91,6 +104,52 @@ Run the bot:
 ```powershell
 uv run main.py
 ```
+
+## Optional Rust Acceleration
+
+NightPaw stays a Python bot. Rust is only used for small pure helper functions where faster text and filename processing is useful.
+
+Current Rust helpers live in [crates/nightpaw_rs](./crates/nightpaw_rs/):
+
+- `normalize_message(text: str) -> str`
+- `chunk_text(text: str, max_chars: int) -> list[str]`
+- `classify_attachment(filename: str) -> str`
+
+Python integration lives in [services/rust_bridge.py](./services/rust_bridge.py).
+
+Important behavior:
+
+- Python remains the main application
+- if `nightpaw_rs` is not installed, NightPaw falls back to Python implementations automatically
+- Discord logic stays in Python; Rust only handles pure utility work
+
+Build the Rust module into the project virtualenv:
+
+```powershell
+$env:UV_CACHE_DIR = ".uv-cache"
+uv sync --group dev
+Push-Location .\crates\nightpaw_rs
+..\..\.venv\Scripts\maturin.exe develop
+Pop-Location
+```
+
+Verify the Rust module is importable:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import nightpaw_rs; print(nightpaw_rs.normalize_message('  Hello   WORLD  '))"
+```
+
+Run NightPaw with Rust enabled:
+
+```powershell
+.\.venv\Scripts\python.exe main.py
+```
+
+When to use Rust vs Python:
+
+- use Rust for tight, reusable helpers with measurable text or filename processing cost
+- keep Discord API access, service orchestration, database logic, and bot behavior in Python
+- prefer Python when the logic is IO-bound, rarely called, or easier to inspect there
 
 ## Windows Startup
 
@@ -430,112 +489,79 @@ Recommended use:
 
 ## Creating Releases
 
-NightPaw includes a local release helper script for safe source snapshots:
+NightPaw now uses a unified local developer helper:
 
-- [scripts/release.ps1](./scripts/release.ps1)
+- [scripts/nightpaw-dev.ps1](./scripts/nightpaw-dev.ps1)
+- [docs/dev-helper.md](./docs/dev-helper.md)
+
+Release usage:
+
+```powershell
+.\scripts\nightpaw-dev.ps1 release -DryRun
+.\scripts\nightpaw-dev.ps1 release
+```
 
 What it does:
 
-- defaults to an automatic release check when run with no arguments
-- refuses to run if the git working tree is dirty
-- checks commits, changed files, and changed lines since the latest tag
-- uses commit messages to choose an automatic version bump
-- creates an annotated git tag only after confirmation or `-Yes`
-- pushes that tag to `origin`
-- creates a GitHub release when `gh` is available
-- supports explicit scheduled/background mode through `-Scheduled`
-- keeps git tags simple and uses a version + date title for GitHub releases
+- checks the latest reachable semver tag
+- analyzes commits since that tag plus current working tree changes
+- recommends whether a release is needed
+- recommends a major, minor, or patch bump
+- creates a local annotated tag only after confirmation or `-Yes`
+- never pushes automatically
+- prints the next manual command when a tag is created
+- treats docs-only changes as a possible no-release case
+
+Version bump rules:
+
+- `BREAKING CHANGE`, `breaking:`, or `!:` -> major
+- `feat:` or a feature-shaped working tree -> minor
+- `fix:`, `perf:`, `refactor:`, `build:`, `test:`, `docs:`, `chore:` -> patch
 
 Examples:
 
 ```powershell
-.\scripts\release.ps1
-.\scripts\release.ps1 -ShowCommits
-.\scripts\release.ps1 -ShowFiles
-.\scripts\release.ps1 -ShowCommits -ShowFiles
+.\scripts\nightpaw-dev.ps1 release -DryRun
+.\scripts\nightpaw-dev.ps1 release
 .\scripts\release.ps1 -DryRun
-.\scripts\release.ps1 -DryRun -ShowCommits -ShowFiles
-.\scripts\release.ps1 -Yes
-.\scripts\release.ps1 -Bump minor
-.\scripts\release.ps1 -Version v2.0.0
-.\scripts\release.ps1 -Scheduled
 ```
-
-Release modes:
-
-- Default run
-  - checks whether a release is recommended
-  - proposes a version automatically
-  - asks for confirmation before creating anything
-- `-DryRun`
-  - prints the report only
-  - never creates a tag or release
-- `-ShowCommits`
-  - shows the commits included since the latest tag
-- `-ShowFiles`
-  - shows a readable git diff/stat summary for the release range
-- `-Yes`
-  - skips the confirmation prompt
-- `-Bump major|minor|patch`
-  - overrides the automatic bump choice
-- `-Version vX.Y.Z`
-  - overrides the automatic version entirely
-- `-ReleaseDate "dd/MM/yyyy"`
-  - overrides the GitHub release title date manually
-- `-Scheduled`
-  - explicit non-interactive mode for Task Scheduler or hidden/background runs
-  - never prompts
-  - only creates a release when the script recommends one
-  - exits cleanly when no release is recommended or when the working tree is dirty
 
 Important detail:
 
-- the date is only used in the GitHub release title
-- the git tag remains plain, for example `v1.0.0`
-- the script only checks when you run it manually
-- it does not monitor the repo automatically
-- scheduled mode is explicit because the script cannot reliably know whether Task Scheduler launched it hidden
-- commit messages influence automatic bumping:
-  - `BREAKING CHANGE`, `breaking:`, or `!:` -> major
-  - `feat:` -> minor
-  - `fix:`, `docs:`, `refactor:`, `chore:`, `style:`, `test:` -> patch
-
-Logging and scheduled use:
-
-- the helper writes to `logs/release-helper.log`
-- console output is kept cleaner for manual use, while detailed timestamped lines stay in the log file
-- scheduled mode still prints normal output if visible, but also logs its decisions
-- if run hidden or with `-NonInteractive`, use `-Scheduled` so it never waits for input
-
-Recommended Task Scheduler PowerShell arguments:
-
-```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -File ".\scripts\release.ps1" -Scheduled
-```
-
-Task Scheduler note:
-
-- your current NightPaw bot task uses a boot trigger with a 30 second delay and launches [start_nightpaw.bat](./start_nightpaw.bat)
-- for scheduled release checks, use a separate task that calls `pwsh` directly with `-Scheduled`
-
-These releases are source snapshots and milestones. They are not backups of `.env`, `data/`, logs, archives, or other ignored runtime files.
+- releases are still manual source snapshots and milestones
+- the helper does not push, create a GitHub release, or touch ignored runtime files
+- if a tag is created, the helper prints `git push origin main --tags` as the next manual step
 
 ## Dev Helper
 
 Usage:
 
 ```powershell
+.\scripts\nightpaw-dev.ps1
 .\scripts\dev.ps1
 ```
 
-This opens a small local menu for common NightPaw development tasks:
+This opens the unified NightPaw developer console for common local tasks:
 
+- show project status
 - show commit context
 - commit changes
 - dry-run a release
-- run a release
-- show release help
-- show git status
+- create a release tag
+- run tests
+- run a bot syntax/import check
+- run a Rust helper check
+
+Compatibility wrappers still exist:
+
+- [scripts/dev.ps1](./scripts/dev.ps1)
+- [scripts/commit.ps1](./scripts/commit.ps1)
+- [scripts/commit_context.ps1](./scripts/commit_context.ps1)
+- [scripts/release.ps1](./scripts/release.ps1)
+
+Windows note:
+
+- git LF or CRLF warnings are usually harmless unless you also see unexpected line-ending churn in the diff
 
 ## Recommended First Checks After Setup
 

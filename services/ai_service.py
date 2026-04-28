@@ -21,6 +21,7 @@ from services.ai_media import (
 )
 from services.ai_state import add_history, get_history, get_memory_rows, remember_fact
 from services.feature_intelligence import build_feature_snapshot, render_feature_summary
+from services.rust_bridge import normalize_message
 from services.runtime_intelligence import build_runtime_facts, direct_answer, render_runtime_block
 
 
@@ -172,7 +173,7 @@ class AIService:
     def _looks_like_attachment_query(self, prompt: str, attachments: AttachmentBatch | None) -> bool:
         if not attachments or not attachments.attachments:
             return False
-        normalized = " ".join((prompt or "").casefold().split())
+        normalized = normalize_message(prompt)
         if not normalized:
             return True
         if normalized == "please analyze the attached content.":
@@ -212,7 +213,7 @@ class AIService:
         return ""
 
     def _is_sensitive_disclosure_request(self, prompt: str) -> bool:
-        normalized = " ".join((prompt or "").casefold().split())
+        normalized = normalize_message(prompt)
         needles = (
             "api endpoint",
             "backend url",
@@ -232,7 +233,7 @@ class AIService:
         return any(needle in normalized for needle in needles)
 
     def _is_prompt_injection_attempt(self, prompt: str) -> bool:
-        normalized = " ".join((prompt or "").casefold().split())
+        normalized = normalize_message(prompt)
         needles = (
             "ignore previous instructions",
             "ignore your instructions",
@@ -248,7 +249,7 @@ class AIService:
         return any(needle in normalized for needle in needles)
 
     def _is_codebase_change_request(self, prompt: str) -> bool:
-        normalized = " ".join((prompt or "").casefold().split())
+        normalized = normalize_message(prompt)
         if not normalized:
             return False
         needles = (
@@ -271,7 +272,7 @@ class AIService:
         return any(needle in normalized for needle in needles)
 
     def _looks_like_action_request(self, prompt: str) -> bool:
-        normalized = " ".join((prompt or "").casefold().split())
+        normalized = normalize_message(prompt)
         if not normalized:
             return False
         action_words = (
@@ -295,7 +296,7 @@ class AIService:
         return None
 
     def _resolve_deterministic_action(self, prompt: str, allowed_commands: list[dict[str, str]]) -> ActionPlan | None:
-        normalized = " ".join((prompt or "").casefold().split())
+        normalized = normalize_message(prompt)
         if not normalized:
             return None
 
@@ -867,7 +868,7 @@ class AIService:
         return "\n\n".join(parts)
 
     def _wants_feature_listing(self, prompt: str) -> bool:
-        normalized = " ".join((prompt or "").casefold().split())
+        normalized = normalize_message(prompt)
         feature_words = (
             "what can you do", "commands", "command", "features", "feature", "help",
             "abilities", "capabilities", "functionality", "functionalities",

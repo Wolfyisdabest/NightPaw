@@ -8,6 +8,7 @@ from typing import Iterable
 import discord
 
 import config
+from services.rust_bridge import chunk_text, classify_attachment, normalize_message
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'}
 TEXT_EXTENSIONS = {
@@ -63,14 +64,14 @@ def _ext(filename: str) -> str:
 
 def _is_image_attachment(att: discord.Attachment) -> bool:
     ctype = (att.content_type or '').casefold()
-    return ctype.startswith('image/') or _ext(att.filename) in IMAGE_EXTENSIONS
+    return ctype.startswith('image/') or classify_attachment(att.filename) == 'image'
 
 
 def _is_text_attachment(att: discord.Attachment) -> bool:
     ctype = (att.content_type or '').casefold()
     if ctype.startswith('text/') or any(ctype.startswith(x) for x in BINARY_TEXTLIKE_CONTENT_TYPES):
         return True
-    return _ext(att.filename) in TEXT_EXTENSIONS
+    return classify_attachment(att.filename) == 'text'
 
 
 def _decode_text(data: bytes) -> str:
@@ -100,7 +101,7 @@ def _looks_textish_bytes(data: bytes) -> bool:
 
 
 def prompt_targets_text_attachment(prompt: str = "") -> bool:
-    prompt_n = " ".join((prompt or "").casefold().split())
+    prompt_n = normalize_message(prompt)
     if not prompt_n:
         return True
     generic_text_words = ("attachment", "file", "text", "txt", "document", "readme", "log")
@@ -127,7 +128,7 @@ def prompt_targets_text_attachment(prompt: str = "") -> bool:
 
 
 def prompt_targets_image_attachment(prompt: str = "") -> bool:
-    prompt_n = " ".join((prompt or "").casefold().split())
+    prompt_n = normalize_message(prompt)
     if not prompt_n:
         return False
     image_queries = (
@@ -263,7 +264,14 @@ def render_attachment_context(batch: AttachmentBatch) -> str:
         prefix += ')'
         lines.append(prefix)
         if att.kind == 'text' and att.text_content:
-            lines.append(f"  Content from {att.filename}:\n```\n{att.text_content}\n```")
+            chunks = chunk_text(att.text_content, 4000)
+            if not chunks:
+                continue
+            if len(chunks) == 1:
+                lines.append(f"  Content from {att.filename}:\n```\n{chunks[0]}\n```")
+                continue
+            for index, chunk in enumerate(chunks, start=1):
+                lines.append(f"  Content from {att.filename} (part {index}/{len(chunks)}):\n```\n{chunk}\n```")
     if batch.warnings:
         lines.append('Attachment handling notes:')
         for warning in batch.warnings:
@@ -276,7 +284,7 @@ def should_prefer_text_attachment_fallback(batch: AttachmentBatch, prompt: str =
     if not batch or not batch.has_text:
         return False
 
-    prompt_n = " ".join((prompt or "").casefold().split())
+    prompt_n = normalize_message(prompt)
     if not prompt_n:
         return True
 
@@ -322,7 +330,7 @@ def build_text_attachment_fallback(batch: AttachmentBatch, prompt: str = "") -> 
     if len(body) > 900:
         excerpt += "…"
 
-    prompt_n = " ".join(prompt.casefold().split())
+    prompt_n = normalize_message(prompt)
     if any(key in prompt_n for key in (
         "summary", "summarize", "sum up", "overview", "what is this about",
         "what is this attachment about", "what is the attachment about", "what is the following attachment about",
@@ -348,7 +356,7 @@ def build_unreadable_attachment_reply(batch: AttachmentBatch, prompt: str = "") 
         return "I did not receive any attachment content on this turn."
 
     names = ", ".join(f"`{att.filename}`" for att in batch.attachments[:3])
-    prompt_n = " ".join((prompt or "").casefold().split())
+    prompt_n = normalize_message(prompt)
     if any(word in prompt_n for word in ("summary", "summarize", "about", "what is this", "what do you see", "read")):
         return (
             f"I received {names}, but I couldn't extract readable text from that file on this turn. "
