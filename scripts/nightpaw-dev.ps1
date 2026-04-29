@@ -959,24 +959,137 @@ function Get-CurrentBranchInfo {
     }
 }
 
-function Test-RemoteTagExists {
+function Get-CurrentHeadCommit {
+    $result = Invoke-Git -Arguments @('rev-parse', 'HEAD')
+    $commit = (($result.Output | Select-Object -First 1) | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($commit)) {
+        throw 'Unable to determine the current HEAD commit.'
+    }
+    return $commit
+}
+
+function Get-ShortCommitId {
+    param([string]$Commit)
+
+    if ([string]::IsNullOrWhiteSpace($Commit)) {
+        return '(none)'
+    }
+    if ($Commit.Length -le 12) {
+        return $Commit
+    }
+    return $Commit.Substring(0, 12)
+}
+
+function Get-LocalTagCommit {
     param([Parameter(Mandatory)][string]$Tag)
 
-    $result = Invoke-Git -Arguments @('ls-remote', '--tags', 'origin', "refs/tags/$Tag") -AllowFailure
+    $result = Invoke-Git -Arguments @('rev-list', '-n', '1', $Tag) -AllowFailure
     if ($result.ExitCode -ne 0) {
-        return $false
+        return $null
     }
 
-    return (@($result.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0)
+    $commit = (($result.Output | Select-Object -First 1) | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($commit)) {
+        return $null
+    }
+
+    return $commit
+}
+
+function Get-RemoteTagCommit {
+    param([Parameter(Mandatory)][string]$Tag)
+
+    $result = Invoke-Git -Arguments @('ls-remote', '--tags', 'origin', "refs/tags/$Tag", "refs/tags/$Tag^{}") -AllowFailure
+    if ($result.ExitCode -ne 0) {
+        return $null
+    }
+
+    $lines = @($result.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($lines.Count -eq 0) {
+        return $null
+    }
+
+    foreach ($line in $lines) {
+        $parts = $line -split '\s+'
+        if ($parts.Count -ge 2 -and $parts[1].Trim() -eq "refs/tags/$Tag^{}") {
+            return $parts[0].Trim()
+        }
+    }
+
+    $firstParts = $lines[0] -split '\s+'
+    if ($firstParts.Count -ge 1) {
+        return $firstParts[0].Trim()
+    }
+
+    return $null
+}
+
+function Get-RemoteTagInfo {
+    param([Parameter(Mandatory)][string]$Tag)
+
+    $result = Invoke-Git -Arguments @('ls-remote', '--tags', 'origin', "refs/tags/$Tag", "refs/tags/$Tag^{}") -AllowFailure
+    if ($result.ExitCode -ne 0) {
+        return [pscustomobject]@{
+            Checked = $false
+            Exists = $false
+            Commit = $null
+            Status = 'unknown'
+        }
+    }
+
+    $lines = @($result.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($lines.Count -eq 0) {
+        return [pscustomobject]@{
+            Checked = $true
+            Exists = $false
+            Commit = $null
+            Status = 'missing'
+        }
+    }
+
+    $commit = $null
+    foreach ($line in $lines) {
+        $parts = $line -split '\s+'
+        if ($parts.Count -ge 2 -and $parts[1].Trim() -eq "refs/tags/$Tag^{}") {
+            $commit = $parts[0].Trim()
+            break
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($commit)) {
+        $firstParts = $lines[0] -split '\s+'
+        if ($firstParts.Count -ge 1) {
+            $commit = $firstParts[0].Trim()
+        }
+    }
+
+    return [pscustomobject]@{
+        Checked = $true
+        Exists = (-not [string]::IsNullOrWhiteSpace($commit))
+        Commit = $commit
+        Status = $(if ([string]::IsNullOrWhiteSpace($commit)) { 'missing' } else { 'present' })
+    }
+}
+
+function Test-RemoteTagExists {
+    param([Parameter(Mandatory)][string]$Tag)
+    $remoteInfo = Get-RemoteTagInfo -Tag $Tag
+    return ($remoteInfo.Checked -and $remoteInfo.Exists)
 }
 
 function Invoke-ReleasePush {
     param(
         [Parameter(Mandatory)][string]$Branch,
-        [Parameter(Mandatory)][string]$Tag
+        [Parameter(Mandatory)][string]$Tag,
+        [switch]$IncludeTags
     )
 
-    $result = Invoke-Git -Arguments @('push', 'origin', $Branch, '--tags') -AllowFailure
+    $pushArgs = @('push', 'origin', $Branch)
+    if ($IncludeTags) {
+        $pushArgs += '--tags'
+    }
+
+    $result = Invoke-Git -Arguments $pushArgs -AllowFailure
     $combinedOutput = @($result.Output) -join "`n"
     $tagAvailableOnRemote = Test-RemoteTagExists -Tag $Tag
     $branchRejected = ($combinedOutput -match [regex]::Escape("$Branch -> $Branch") -and $combinedOutput -match 'rejected')
@@ -1282,6 +1395,216 @@ function Invoke-GitHubReleaseCreate {
     return $true
 }
 
+function Get-BranchSyncStatus {
+    param([Parameter(Mandatory)][string]$Branch)
+
+    $remoteRef = "refs/remotes/origin/$Branch"
+    $existsResult = Invoke-Git -Arguments @('show-ref', '--verify', $remoteRef) -AllowFailure
+    if ($existsResult.ExitCode -ne 0) {
+        return [pscustomobject]@{
+            RemoteRef = "origin/$Branch"
+            Exists = $false
+            Ahead = 0
+            Behind = 0
+            Status = 'no-upstream'
+        }
+    }
+
+    $countResult = Invoke-Git -Arguments @('rev-list', '--left-right', '--count', "$remoteRef...HEAD") -AllowFailure
+    if ($countResult.ExitCode -ne 0) {
+        return [pscustomobject]@{
+            RemoteRef = "origin/$Branch"
+            Exists = $true
+            Ahead = 0
+            Behind = 0
+            Status = 'unknown'
+        }
+    }
+
+    $raw = (($countResult.Output | Select-Object -First 1) | Out-String).Trim()
+    $parts = @($raw -split '\s+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($parts.Count -lt 2) {
+        return [pscustomobject]@{
+            RemoteRef = "origin/$Branch"
+            Exists = $true
+            Ahead = 0
+            Behind = 0
+            Status = 'unknown'
+        }
+    }
+
+    $behind = 0
+    $ahead = 0
+    [void][int]::TryParse($parts[0], [ref]$behind)
+    [void][int]::TryParse($parts[1], [ref]$ahead)
+
+    $status = 'aligned'
+    if ($ahead -gt 0 -and $behind -gt 0) {
+        $status = 'diverged'
+    }
+    elseif ($ahead -gt 0) {
+        $status = 'ahead'
+    }
+    elseif ($behind -gt 0) {
+        $status = 'behind'
+    }
+
+    return [pscustomobject]@{
+        RemoteRef = "origin/$Branch"
+        Exists = $true
+        Ahead = $ahead
+        Behind = $behind
+        Status = $status
+    }
+}
+
+function Get-GitHubReleaseStatus {
+    param([Parameter(Mandatory)][string]$Tag)
+
+    if (-not (Test-CommandAvailable -Name 'gh')) {
+        return [pscustomobject]@{
+            Checked = $false
+            Exists = $false
+            Status = 'unknown (gh unavailable)'
+            Url = $null
+        }
+    }
+
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $previousErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& gh release view $Tag --json tagName,url 2>$stderrPath)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorPreference
+    }
+
+    $stderrLines = @()
+    if (Test-Path -LiteralPath $stderrPath) {
+        $stderrLines = @(Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue)
+        Remove-Item -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+    }
+
+    if ($exitCode -eq 0) {
+        $jsonText = ($output -join "`n").Trim()
+        $url = $null
+        if (-not [string]::IsNullOrWhiteSpace($jsonText)) {
+            try {
+                $json = $jsonText | ConvertFrom-Json
+                $url = [string]$json.url
+            }
+            catch {
+                $url = $null
+            }
+        }
+
+        return [pscustomobject]@{
+            Checked = $true
+            Exists = $true
+            Status = 'yes'
+            Url = $url
+        }
+    }
+
+    $stderrText = (($stderrLines -join "`n").Trim()).ToLowerInvariant()
+    if ($stderrText -match 'release not found' -or $stderrText -match 'http 404') {
+        return [pscustomobject]@{
+            Checked = $true
+            Exists = $false
+            Status = 'no'
+            Url = $null
+        }
+    }
+
+    return [pscustomobject]@{
+        Checked = $false
+        Exists = $false
+        Status = 'unknown (gh check failed)'
+        Url = $null
+    }
+}
+
+function Get-ReleaseStateSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$Tag,
+        [Parameter(Mandatory)][string]$Branch,
+        [switch]$IsDetachedHead
+    )
+
+    $headCommit = Get-CurrentHeadCommit
+    $localTagCommit = Get-LocalTagCommit -Tag $Tag
+    $remoteTagInfo = Get-RemoteTagInfo -Tag $Tag
+    $gitHubRelease = Get-GitHubReleaseStatus -Tag $Tag
+    $branchSync = if ($IsDetachedHead) {
+        [pscustomobject]@{
+            RemoteRef = '(detached)'
+            Exists = $false
+            Ahead = 0
+            Behind = 0
+            Status = 'detached'
+        }
+    }
+    else {
+        Get-BranchSyncStatus -Branch $Branch
+    }
+
+    return [pscustomobject]@{
+        Tag = $Tag
+        HeadCommit = $headCommit
+        LocalTagCommit = $localTagCommit
+        LocalTagExists = (-not [string]::IsNullOrWhiteSpace($localTagCommit))
+        RemoteTagCommit = $remoteTagInfo.Commit
+        RemoteTagExists = $remoteTagInfo.Exists
+        RemoteTagChecked = $remoteTagInfo.Checked
+        RemoteTagStatus = $remoteTagInfo.Status
+        GitHubRelease = $gitHubRelease
+        BranchSync = $branchSync
+    }
+}
+
+function Show-ReleaseState {
+    param([Parameter(Mandatory)][pscustomobject]$ReleaseState)
+
+    Write-Section 'Release Status'
+    Write-InfoLine ("Current HEAD: {0}" -f (Get-ShortCommitId -Commit $ReleaseState.HeadCommit))
+    Write-InfoLine ("Local tag target (peeled commit): {0}" -f $(if ($ReleaseState.LocalTagExists) { Get-ShortCommitId -Commit $ReleaseState.LocalTagCommit } else { '(missing)' }))
+    Write-InfoLine ("Remote tag target (peeled commit): {0}" -f $(if (-not $ReleaseState.RemoteTagChecked) { '(unknown)' } elseif ($ReleaseState.RemoteTagExists) { Get-ShortCommitId -Commit $ReleaseState.RemoteTagCommit } else { '(missing)' }))
+    Write-InfoLine ("GitHub release exists: {0}" -f $ReleaseState.GitHubRelease.Status)
+    if (-not [string]::IsNullOrWhiteSpace($ReleaseState.GitHubRelease.Url)) {
+        Write-InfoLine ("GitHub release URL: {0}" -f $ReleaseState.GitHubRelease.Url)
+    }
+
+    $branchStatus = switch ($ReleaseState.BranchSync.Status) {
+        'aligned' { 'aligned with origin' }
+        'ahead' { "ahead of origin by $($ReleaseState.BranchSync.Ahead)" }
+        'behind' { "behind origin by $($ReleaseState.BranchSync.Behind)" }
+        'diverged' { "diverged (ahead $($ReleaseState.BranchSync.Ahead), behind $($ReleaseState.BranchSync.Behind))" }
+        'no-upstream' { 'no origin tracking branch found' }
+        'detached' { 'detached HEAD' }
+        default { 'unknown' }
+    }
+    Write-InfoLine ("Branch sync: {0}" -f $branchStatus)
+}
+
+function Assert-ReleaseTagMatchesHead {
+    param(
+        [Parameter(Mandatory)][string]$Tag,
+        [Parameter(Mandatory)][string]$HeadCommit,
+        [string]$LocalTagCommit,
+        [string]$RemoteTagCommit
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($LocalTagCommit) -and $LocalTagCommit -ne $HeadCommit) {
+        throw ("Local tag {0} points to {1}, but HEAD is {2}. Do not delete or move it automatically. Inspect with 'git show {0}' and choose a new version or fix the release state manually." -f $Tag, (Get-ShortCommitId -Commit $LocalTagCommit), (Get-ShortCommitId -Commit $HeadCommit))
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($RemoteTagCommit) -and $RemoteTagCommit -ne $HeadCommit) {
+        throw ("Remote tag {0} on origin points to {1}, but HEAD is {2}. Do not force-push or delete tags automatically. Fetch, inspect 'git show {0}', and choose a new version or reconcile the release state manually." -f $Tag, (Get-ShortCommitId -Commit $RemoteTagCommit), (Get-ShortCommitId -Commit $HeadCommit))
+    }
+}
+
 function Test-IsSemVerTag {
     param([string]$Tag)
     return ($Tag -match '^v\d+\.\d+\.\d+$')
@@ -1466,6 +1789,7 @@ function Invoke-ReleaseFlow {
 
     Assert-GitRepository
     $analysis = Get-ReleaseAnalysis -RequestedBumpType $Type
+    $releaseState = Get-ReleaseStateSnapshot -Tag $analysis.ProposedVersion -Branch $analysis.Branch -IsDetachedHead:$analysis.IsDetachedHead
 
     Write-Header 'NightPaw Release Helper'
     Write-InfoLine ("Latest tag: {0}" -f $(if ($analysis.LatestTag) { $analysis.LatestTag } else { 'none' }))
@@ -1477,6 +1801,7 @@ function Invoke-ReleaseFlow {
     if ($analysis.IsDetachedHead) {
         Write-WarnLine 'Detached HEAD detected. The helper will not push automatically from this state.'
     }
+    Show-ReleaseState -ReleaseState $releaseState
 
     Write-Section 'Why'
     foreach ($reason in @($analysis.Reasons)) {
@@ -1536,8 +1861,26 @@ function Invoke-ReleaseFlow {
         Write-WarnLine 'CHANGELOG.md does not contain this version yet.'
     }
 
+    Assert-ReleaseTagMatchesHead -Tag $analysis.ProposedVersion -HeadCommit $releaseState.HeadCommit -LocalTagCommit $releaseState.LocalTagCommit -RemoteTagCommit $releaseState.RemoteTagCommit
+
+    $releaseArtifactsExist = $releaseState.LocalTagExists -or $releaseState.RemoteTagExists -or $releaseState.GitHubRelease.Exists
+    if ($releaseArtifactsExist) {
+        Write-WarnLine ("Release artifacts for {0} already exist. The helper will not rewrite CHANGELOG.md automatically." -f $analysis.ProposedVersion)
+    }
+
     if ($DryRunMode) {
         Write-WarnLine 'Dry run only. No tag was created.'
+        return
+    }
+    if (-not $releaseState.RemoteTagChecked) {
+        Write-WarnLine ("Remote tag state for {0} could not be verified. Resolve git remote access first, then rerun the release helper." -f $analysis.ProposedVersion)
+        return
+    }
+    if ($releaseState.GitHubRelease.Exists) {
+        Write-SuccessLine ("GitHub release for {0} already exists." -f $analysis.ProposedVersion)
+        if (-not [string]::IsNullOrWhiteSpace($releaseState.GitHubRelease.Url)) {
+            Write-InfoLine ("Release URL: {0}" -f $releaseState.GitHubRelease.Url)
+        }
         return
     }
     if (-not $analysis.ReleaseRecommended) {
@@ -1548,7 +1891,13 @@ function Invoke-ReleaseFlow {
         Write-WarnLine 'Working tree is dirty. Commit or stash changes before creating a real release tag.'
         return
     }
-    if ($changelogPreview.RequiresWrite) {
+    if ($releaseState.BranchSync.Status -in @('behind', 'diverged')) {
+        Write-WarnLine ("Current branch is {0} relative to {1}. Pull or rebase before creating or publishing this release." -f $releaseState.BranchSync.Status, $releaseState.BranchSync.RemoteRef)
+        return
+    }
+
+    $tagExistsAtHead = ($releaseState.LocalTagExists -or $releaseState.RemoteTagExists)
+    if ((-not $tagExistsAtHead) -and $changelogPreview.RequiresWrite) {
         if (-not (Confirm-Action -Prompt ("Write CHANGELOG.md entry for {0}? [y/N]" -f $analysis.ProposedVersion) -AssumeYes:$AssumeYes)) {
             Write-WarnLine 'Release canceled before CHANGELOG.md update.'
             return
@@ -1558,13 +1907,26 @@ function Invoke-ReleaseFlow {
         Write-WarnLine 'CHANGELOG.md was updated. Commit it before or with the release, then rerun the release command.'
         return
     }
-    if (-not (Confirm-Action -Prompt ("Create annotated tag {0}? [y/N]" -f $analysis.ProposedVersion) -AssumeYes:$AssumeYes)) {
-        Write-WarnLine 'Release canceled.'
-        return
-    }
 
-    Invoke-Git -Arguments @('tag', '-a', $analysis.ProposedVersion, '-m', ("NightPaw {0}" -f $analysis.ProposedVersion)) | Out-Null
-    Write-SuccessLine ("Created annotated tag {0}." -f $analysis.ProposedVersion)
+    if ($releaseState.LocalTagExists) {
+        Write-InfoLine ("Local tag {0} already points to HEAD. Skipping local tag creation." -f $analysis.ProposedVersion)
+    }
+    else {
+        if ($releaseState.RemoteTagExists) {
+            Write-InfoLine ("Remote tag {0} already points to HEAD. Skipping local tag creation." -f $analysis.ProposedVersion)
+        }
+        else {
+            if (-not (Confirm-Action -Prompt ("Create annotated tag {0}? [y/N]" -f $analysis.ProposedVersion) -AssumeYes:$AssumeYes)) {
+                Write-WarnLine 'Release canceled.'
+                return
+            }
+
+            Invoke-Git -Arguments @('tag', '-a', $analysis.ProposedVersion, '-m', ("NightPaw {0}" -f $analysis.ProposedVersion)) | Out-Null
+            Write-SuccessLine ("Created annotated tag {0}." -f $analysis.ProposedVersion)
+            $releaseState = Get-ReleaseStateSnapshot -Tag $analysis.ProposedVersion -Branch $analysis.Branch -IsDetachedHead:$analysis.IsDetachedHead
+            Assert-ReleaseTagMatchesHead -Tag $analysis.ProposedVersion -HeadCommit $releaseState.HeadCommit -LocalTagCommit $releaseState.LocalTagCommit -RemoteTagCommit $releaseState.RemoteTagCommit
+        }
+    }
 
     $didPush = $false
     $tagAvailableOnRemote = $false
@@ -1578,22 +1940,34 @@ function Invoke-ReleaseFlow {
     }
 
     if ($shouldPush) {
-        $pushResult = Invoke-ReleasePush -Branch $analysis.Branch -Tag $analysis.ProposedVersion
-        $didPush = $pushResult.Succeeded
-        $tagAvailableOnRemote = $pushResult.TagAvailableOnRemote
-
-        if ($pushResult.Succeeded) {
-            Write-SuccessLine ("Pushed branch {0} and tags to origin." -f $analysis.Branch)
+        $includeTags = (-not $releaseState.RemoteTagExists)
+        if ($releaseState.RemoteTagExists -and $releaseState.BranchSync.Status -eq 'aligned') {
+            Write-InfoLine ("Remote tag {0} already exists and branch {1} is aligned with origin. No push was needed." -f $analysis.ProposedVersion, $analysis.Branch)
         }
         else {
-            if ($pushResult.TagAvailableOnRemote) {
-                Write-WarnLine ("Tag {0} is available on origin, but branch {1} was not pushed." -f $analysis.ProposedVersion, $analysis.Branch)
-                if ($pushResult.BranchRejected) {
-                    Write-WarnLine ("Branch {0} was rejected by origin. Pull or rebase, then push the branch separately." -f $analysis.Branch)
+            $pushResult = Invoke-ReleasePush -Branch $analysis.Branch -Tag $analysis.ProposedVersion -IncludeTags:$includeTags
+            $didPush = $pushResult.Succeeded
+            $tagAvailableOnRemote = $pushResult.TagAvailableOnRemote
+            $releaseState = Get-ReleaseStateSnapshot -Tag $analysis.ProposedVersion -Branch $analysis.Branch -IsDetachedHead:$analysis.IsDetachedHead
+
+            if ($pushResult.Succeeded) {
+                if ($includeTags) {
+                    Write-SuccessLine ("Pushed branch {0} and release tag {1} to origin." -f $analysis.Branch, $analysis.ProposedVersion)
+                }
+                else {
+                    Write-SuccessLine ("Pushed branch {0} to origin. Release tag {1} was already present on origin." -f $analysis.Branch, $analysis.ProposedVersion)
                 }
             }
             else {
-                throw ("git push origin {0} --tags failed with exit code {1}." -f $analysis.Branch, $pushResult.ExitCode)
+                if ($pushResult.TagAvailableOnRemote) {
+                    Write-WarnLine ("Tag {0} is available on origin, but branch {1} was not fully pushed." -f $analysis.ProposedVersion, $analysis.Branch)
+                    if ($pushResult.BranchRejected -or $releaseState.BranchSync.Status -in @('behind', 'diverged')) {
+                        Write-WarnLine ("Branch {0} is not aligned with origin. Pull or rebase, then push the branch separately before creating a GitHub release." -f $analysis.Branch)
+                    }
+                }
+                else {
+                    throw ("git push origin {0}{1} failed with exit code {2}." -f $analysis.Branch, $(if ($includeTags) { ' --tags' } else { '' }), $pushResult.ExitCode)
+                }
             }
         }
     }
@@ -1603,24 +1977,38 @@ function Invoke-ReleaseFlow {
         if ($analysis.IsDetachedHead) {
             Write-InfoLine 'git push origin <branch-name> --tags'
         }
+        elseif ($releaseState.RemoteTagExists) {
+            Write-InfoLine ("git push origin {0}" -f $analysis.Branch)
+        }
         else {
             Write-InfoLine ("git push origin {0} --tags" -f $analysis.Branch)
         }
     }
 
     $shouldCreateGitHubRelease = $false
+    $releaseState = Get-ReleaseStateSnapshot -Tag $analysis.ProposedVersion -Branch $analysis.Branch -IsDetachedHead:$analysis.IsDetachedHead
     if ($CreateReleaseAfterPush) {
-        if ($didPush) {
+        if ($releaseState.GitHubRelease.Exists) {
+            Write-SuccessLine ("GitHub release for {0} already exists." -f $analysis.ProposedVersion)
+            if (-not [string]::IsNullOrWhiteSpace($releaseState.GitHubRelease.Url)) {
+                Write-InfoLine ("Release URL: {0}" -f $releaseState.GitHubRelease.Url)
+            }
+            return
+        }
+        if ($releaseState.RemoteTagExists -and $releaseState.BranchSync.Status -eq 'aligned') {
             $shouldCreateGitHubRelease = $true
         }
-        elseif ($tagAvailableOnRemote) {
-            Write-WarnLine 'GitHub release creation was skipped because the branch push did not complete.'
+        elseif ($releaseState.RemoteTagExists) {
+            Write-WarnLine 'GitHub release creation was skipped because the branch is not aligned with origin.'
+        }
+        else {
+            Write-WarnLine 'GitHub release creation was skipped because the release tag is not available on origin yet.'
         }
     }
-    elseif ($didPush -and (Test-CommandAvailable -Name 'gh')) {
+    elseif ($releaseState.RemoteTagExists -and $releaseState.BranchSync.Status -eq 'aligned' -and (Test-CommandAvailable -Name 'gh')) {
         $shouldCreateGitHubRelease = Confirm-Action -Prompt 'Create GitHub release with gh now? [y/N]'
     }
-    elseif ($didPush) {
+    elseif ($releaseState.RemoteTagExists -and $releaseState.BranchSync.Status -eq 'aligned') {
         Write-WarnLine 'GitHub CLI is not available. You can create the GitHub release manually later.'
     }
 
@@ -1877,6 +2265,14 @@ function Show-HelpPanel {
     Write-InfoLine 'Release previews include grouped notes, commits, changed files, and the CHANGELOG entry.'
     Write-InfoLine '-UseTagNotes restores gh --notes-from-tag as an explicit fallback.'
     Write-InfoLine 'Legacy-style flags such as --dry-run and --help are also accepted.'
+    Write-Host ''
+    Write-InfoLine 'Release validation commands:'
+    Write-InfoLine '  Fresh release: .\scripts\nightpaw-dev.ps1 release -DryRun'
+    Write-InfoLine '  Existing local tag: git tag --list v1.2.0; .\scripts\nightpaw-dev.ps1 release -DryRun'
+    Write-InfoLine '  Existing remote tag: git ls-remote --tags origin refs/tags/v1.2.0*; .\scripts\nightpaw-dev.ps1 release -DryRun'
+    Write-InfoLine '  Existing GitHub release: gh release view v1.2.0 --json tagName,url'
+    Write-InfoLine '  Partial push success: inspect Release Status after a rejected branch push; tag should show on origin while branch sync is behind/diverged'
+    Write-InfoLine '  Branch diverged: git rev-list --left-right --count refs/remotes/origin/<branch>...HEAD'
 }
 
 function Resolve-CommandArguments {
