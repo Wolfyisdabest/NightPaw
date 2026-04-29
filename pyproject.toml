@@ -14,7 +14,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "maturin>=1.7,<2",
-    "pytest>=8.3,<9",
+    "pytest>=9.0.3,<10",
 ]
 
 [tool.pytest.ini_options]
