@@ -5,21 +5,11 @@ from discord import app_commands
 import os
 import config
 from config import wolf_wrap
-from checks import is_owner_slash
+from checks import is_owner_dm_only, is_owner_slash
 
 COGS_DIR = "./cogs"
 # This cog cannot be unloaded
 PROTECTED_COGS = {"cogs.cogmanager"}
-
-def is_owner_dm_only():
-    async def predicate(ctx):
-        if ctx.author.id != config.OWNER_ID:
-            return False
-        if not isinstance(ctx.channel, discord.DMChannel):
-            await ctx.send(wolf_wrap("Cog management only works in my DMs."))
-            return False
-        return True
-    return commands.check(predicate)
 
 class CogManager(commands.Cog):
     def __init__(self, bot):
@@ -79,7 +69,7 @@ class CogManager(commands.Cog):
             await send(wolf_wrap(f"Failed to load `{path}`: `{e}`"))
 
     @commands.command(name="cogload", help="Load a cog by name (Owner DM only)")
-    @is_owner_dm_only()
+    @is_owner_dm_only("Cog management only works in my DMs.")
     async def cogload_prefix(self, ctx, cog: str):
         await self._load(ctx.send, cog)
 
@@ -108,7 +98,7 @@ class CogManager(commands.Cog):
             await send(wolf_wrap(f"Failed to unload `{path}`: `{e}`"))
 
     @commands.command(name="cogunload", help="Unload a cog by name (Owner DM only)")
-    @is_owner_dm_only()
+    @is_owner_dm_only("Cog management only works in my DMs.")
     async def cogunload_prefix(self, ctx, cog: str):
         await self._unload(ctx.send, cog)
 
@@ -142,7 +132,7 @@ class CogManager(commands.Cog):
             await send(wolf_wrap(f"Failed to reload `{path}`: `{e}`"))
 
     @commands.command(name="cogreload", help="Reload a cog by name (Owner DM only)")
-    @is_owner_dm_only()
+    @is_owner_dm_only("Cog management only works in my DMs.")
     async def cogreload_prefix(self, ctx, cog: str):
         await self._reload(ctx.send, cog)
 
@@ -175,7 +165,7 @@ class CogManager(commands.Cog):
         await send(embed=embed)
 
     @commands.command(name="cogreloadall", help="Reload all loaded cogs (Owner DM only)")
-    @is_owner_dm_only()
+    @is_owner_dm_only("Cog management only works in my DMs.")
     async def cogreloadall_prefix(self, ctx):
         await self._reload_all(ctx.send)
 
@@ -213,7 +203,7 @@ class CogManager(commands.Cog):
         await send(embed=embed)
 
     @commands.command(name="cogloadnew", help="Load any unloaded cogs found in cogs/ (Owner DM only)")
-    @is_owner_dm_only()
+    @is_owner_dm_only("Cog management only works in my DMs.")
     async def cogloadnew_prefix(self, ctx):
         await self._loadnew(ctx.send)
 
@@ -228,7 +218,7 @@ class CogManager(commands.Cog):
     # ── Status ────────────────────────────────────────────────────────────────
 
     @commands.command(name="cogstatus", help="Show loaded and available cogs (Owner DM only)")
-    @is_owner_dm_only()
+    @is_owner_dm_only("Cog management only works in my DMs.")
     async def cogstatus_prefix(self, ctx):
         await ctx.send(embed=self._status_embed())
 

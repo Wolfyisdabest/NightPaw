@@ -27,7 +27,7 @@ class PackHealth(commands.Cog):
             return "unavailable"
         return f"{round(latency * 1000)}ms"
 
-    async def _build_health_embed(self) -> discord.Embed:
+    async def _build_health_embeds(self) -> list[discord.Embed]:
         uptime_seconds = int(time.time() - START_TIME)
         days = uptime_seconds // 86400
         hours = (uptime_seconds % 86400) // 3600
@@ -78,26 +78,25 @@ class PackHealth(commands.Cog):
                 act = bot_member.activity
                 activity_str = f"{str(act.type).split('.')[-1].capitalize()} {act.name}"
 
-        embed = discord.Embed(title="🐺 NightPaw — Pack Health", color=config.BOT_COLOR)
-        embed.add_field(name="⏱️ Uptime", value=uptime_str, inline=True)
-        embed.add_field(name="📡 Latency", value=self._latency_text(), inline=True)
-        embed.add_field(name="🧩 Cogs Loaded", value=str(len(self.bot.cogs)), inline=True)
-        embed.add_field(name="🌐 Status", value=status_str, inline=True)
-        embed.add_field(name="🎮 Activity", value=activity_str, inline=True)
-        embed.add_field(name="🖥️ Servers", value=str(len(self.bot.guilds)), inline=True)
-        embed.add_field(name="⚠️ Total Warns", value=str(warn_count), inline=True)
-        embed.add_field(name="⏰ Pending Reminders", value=str(reminder_count), inline=True)
-        embed.add_field(name="🤝 Trusted Members", value=str(trusted_count), inline=True)
-        embed.add_field(name="🛡️ AutoMod", value=automod_status, inline=True)
-        embed.add_field(name="🔥 AutoMod Strikes", value=str(strike_count), inline=True)
-        embed.add_field(name="​", value="​", inline=True)
-        embed.add_field(name="🔧 Bot CPU", value=f"{cpu}%", inline=True)
-        embed.add_field(name="💾 Bot RAM", value=f"{mem:.1f} MB", inline=True)
-        embed.add_field(name="🐍 Python", value=platform.python_version(), inline=True)
-        embed.add_field(name="🗃️ DB", value=DB_PATH.name, inline=True)
-        embed.add_field(name="📝 Log File", value=f"{log_size_mb:.2f} MB", inline=True)
-        embed.add_field(name="🤖 AI Model", value=getattr(config, "AI_MODEL", "unknown"), inline=True)
-        embed.add_field(name="👁️ Vision Model", value=getattr(config, "AI_VISION_MODEL", "none") or "none", inline=True)
+        summary = discord.Embed(title="🐺 NightPaw — Pack Health", color=config.BOT_COLOR)
+        summary.add_field(name="⏱️ Uptime", value=uptime_str, inline=True)
+        summary.add_field(name="📡 Latency", value=self._latency_text(), inline=True)
+        summary.add_field(name="🧩 Cogs Loaded", value=str(len(self.bot.cogs)), inline=True)
+        summary.add_field(name="🌐 Status", value=status_str, inline=True)
+        summary.add_field(name="🎮 Activity", value=activity_str, inline=True)
+        summary.add_field(name="🖥️ Servers", value=str(len(self.bot.guilds)), inline=True)
+        summary.add_field(name="⚠️ Total Warns", value=str(warn_count), inline=True)
+        summary.add_field(name="⏰ Pending Reminders", value=str(reminder_count), inline=True)
+        summary.add_field(name="🤝 Trusted Members", value=str(trusted_count), inline=True)
+        summary.add_field(name="🛡️ AutoMod", value=automod_status, inline=True)
+        summary.add_field(name="🔥 AutoMod Strikes", value=str(strike_count), inline=True)
+        summary.add_field(name="🔧 Bot CPU", value=f"{cpu}%", inline=True)
+        summary.add_field(name="💾 Bot RAM", value=f"{mem:.1f} MB", inline=True)
+        summary.add_field(name="🐍 Python", value=platform.python_version(), inline=True)
+        summary.add_field(name="🗃️ DB", value=DB_PATH.name, inline=True)
+        summary.add_field(name="📝 Log File", value=f"{log_size_mb:.2f} MB", inline=True)
+        summary.add_field(name="🤖 AI Model", value=getattr(config, "AI_MODEL", "unknown"), inline=True)
+        summary.add_field(name="👁️ Vision Model", value=getattr(config, "AI_VISION_MODEL", "none") or "none", inline=True)
         route = str(ai_diag.get("route_used") or "idle")
         route_reason = str(ai_diag.get("route_reason") or "not used yet this session")
         planner = str(ai_diag.get("action_planner_used") or "none")
@@ -111,22 +110,25 @@ class PackHealth(commands.Cog):
                 last_age = f"{int(age_seconds)}s ago"
             except Exception:
                 last_age = "timestamp parse unavailable"
-        embed.add_field(name="📎 Last AI Route", value=route, inline=True)
-        embed.add_field(name="🧭 Last Reason", value=route_reason[:120], inline=True)
-        embed.add_field(name="🧠 Planner", value=f"{planner} / {confidence}", inline=True)
-        embed.add_field(name="🗂️ Memory Usage", value=memory_usage, inline=True)
-        embed.add_field(name="🧯 Last Fallback", value=str(ai_diag.get("fallback_used") or "none"), inline=True)
-        embed.add_field(name="🔍 Vision Prepass", value="Yes" if ai_diag.get("vision_prepass_used") else "No", inline=True)
-        embed.add_field(name="💬 Last Chat Model", value=str(ai_diag.get("chat_model_used") or "none"), inline=True)
-        embed.add_field(name="🕒 Last AI Turn", value=last_age, inline=True)
-        embed.add_field(name="🧩 Runtime", value=str(ai_diag.get("runtime_sections_included") or "none")[:200], inline=False)
-        embed.set_footer(text="🐺 Curiosity leads, loyalty follows, strength protects.")
-        return embed
+        diagnostics = discord.Embed(title="🐺 NightPaw — Pack Health (AI Diagnostics)", color=config.BOT_COLOR)
+        diagnostics.add_field(name="📎 Last AI Route", value=route, inline=True)
+        diagnostics.add_field(name="🧭 Last Reason", value=route_reason[:120], inline=True)
+        diagnostics.add_field(name="🧠 Planner", value=f"{planner} / {confidence}", inline=True)
+        diagnostics.add_field(name="🗂️ Memory Usage", value=memory_usage, inline=True)
+        diagnostics.add_field(name="🧯 Last Fallback", value=str(ai_diag.get("fallback_used") or "none"), inline=True)
+        diagnostics.add_field(name="🔍 Vision Prepass", value="Yes" if ai_diag.get("vision_prepass_used") else "No", inline=True)
+        diagnostics.add_field(name="💬 Last Chat Model", value=str(ai_diag.get("chat_model_used") or "none"), inline=True)
+        diagnostics.add_field(name="🕒 Last AI Turn", value=last_age, inline=True)
+        diagnostics.add_field(name="🧩 Runtime", value=str(ai_diag.get("runtime_sections_included") or "none")[:200], inline=False)
+        summary.set_footer(text="🐺 Curiosity leads, loyalty follows, strength protects. • 1/2")
+        diagnostics.set_footer(text="🐺 Curiosity leads, loyalty follows, strength protects. • 2/2")
+        return [summary, diagnostics]
 
     @commands.command(name="packhealth", help="Show full bot health status (Owner/Trusted DM only)")
     @is_owner_or_trusted_dm()
     async def packhealth_prefix(self, ctx):
-        await ctx.send(embed=await self._build_health_embed())
+        for embed in await self._build_health_embeds():
+            await ctx.send(embed=embed)
 
     @app_commands.command(name="packhealth", description="Show full bot health status (Owner/Trusted only)", extras={"category": "trusted"})
     @app_commands.allowed_installs(guilds=True, users=True)
@@ -134,7 +136,10 @@ class PackHealth(commands.Cog):
     @is_owner_or_trusted_slash()
     async def packhealth_slash(self, interaction: discord.Interaction, ephemeral: bool = False):
         await interaction.response.defer(ephemeral=ephemeral)
-        await interaction.followup.send(embed=await self._build_health_embed(), ephemeral=ephemeral)
+        embeds = await self._build_health_embeds()
+        await interaction.followup.send(embed=embeds[0], ephemeral=ephemeral)
+        for embed in embeds[1:]:
+            await interaction.followup.send(embed=embed, ephemeral=ephemeral)
 
 
 async def setup(bot):

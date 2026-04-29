@@ -15,7 +15,7 @@ from discord.ext.commands.view import StringView
 
 import config
 from config import wolf_wrap
-from checks import user_is_trusted
+from checks import allow_everywhere_slash, user_is_trusted
 from services.ai_media import collect_message_attachments, process_discord_attachments
 from services.ai_service import AIService
 from services.ai_state import (
@@ -58,7 +58,7 @@ class AI(commands.Cog):
         "userinfo", "warnings",
         "aistatus", "aidiag", "aisetchannel", "aiclearchannel", "aienable", "aidisable",
         "aimentions", "aismart", "aiprompt", "aiclearhistory",
-        "sysinfo", "botping", "debugreport",
+        "botping", "debugreport",
     }
 
     def __init__(self, bot: commands.Bot):
@@ -84,6 +84,29 @@ class AI(commands.Cog):
         self.cooldowns[key] = now
         return True
 
+    def _log_auto_reply(self, message: discord.Message, event: str, *, level: int = logging.DEBUG, **fields) -> None:
+        preview = " ".join((message.content or "").split())[:80]
+        context = {
+            "event": event,
+            "message_id": message.id,
+            "author_id": getattr(message.author, "id", 0),
+            "guild_id": getattr(message.guild, "id", None),
+            "channel_id": getattr(message.channel, "id", None),
+            "attachments": len(message.attachments),
+            "preview": preview or "(empty)",
+        }
+        for key, value in fields.items():
+            context[key] = value
+        rendered = " ".join(f"{key}={value}" for key, value in context.items())
+        logger.log(level, "AI auto-response decision", extra={"context": f" {rendered}"})
+
+    async def _starts_with_real_command(self, message: discord.Message) -> bool:
+        content = (message.content or "").lstrip()
+        if not content.startswith(config.PREFIX):
+            return False
+        ctx = await self.bot.get_context(message)
+        return bool(getattr(ctx, "valid", False))
+
     async def _is_admin_here(self, source) -> bool:
         if isinstance(source, commands.Context):
             if not source.guild:
@@ -101,6 +124,24 @@ class AI(commands.Cog):
         if not target.response.is_done():
             return await target.response.send_message(text, ephemeral=ephemeral)
         return await target.followup.send(text, ephemeral=ephemeral)
+
+    async def _require_guild_admin(self, ctx: commands.Context) -> bool:
+        if ctx.guild is None:
+            await ctx.send(wolf_wrap("This command can only be used inside a server."))
+            return False
+        if not await self._is_admin_here(ctx):
+            await ctx.send(wolf_wrap("You need Manage Server permission for that here."))
+            return False
+        return True
+
+    async def _require_guild_admin_interaction(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None:
+            await self._send_text(interaction, wolf_wrap("This command can only be used inside a server."), ephemeral=True)
+            return False
+        if not await self._is_admin_here(interaction):
+            await self._send_text(interaction, wolf_wrap("You need Manage Server permission for that here."), ephemeral=True)
+            return False
+        return True
 
     async def _send_with_typing(
         self,
@@ -187,9 +228,10 @@ class AI(commands.Cog):
         allowed_categories = {"general"}
         if rank in {"trusted", "owner"}:
             allowed_categories.add("trusted")
-        # Action ranks use `serveradmin`, while command metadata uses the same category name.
+        # AI config commands are server-admin gated and only make sense inside guilds.
         if rank in {"serveradmin", "owner"} and guild is not None:
             allowed_categories.add("serveradmin")
+            allowed_categories.add("aiconfig")
         if rank == "owner":
             allowed_categories.add("owner")
 
@@ -286,6 +328,8 @@ class AI(commands.Cog):
         if guild is not None:
             settings = await get_guild_settings(guild.id)
             if not bool(settings.get("actions_enabled")):
+                if self.service._looks_like_action_request(prompt):
+                    self._log_auto_reply(source_message, "ignored_because_actions_disabled")
                 return "", False, "", {}
 
         allowed_commands = await self._allowed_action_commands(user, guild)
@@ -338,8 +382,6 @@ class AI(commands.Cog):
             return bool(message.attachments)
         if message.attachments and not content.strip():
             return True
-        if message.content.startswith((config.PREFIX, "/", ".")):
-            return False
         if self._is_reply_to_me(message):
             return True
         if "?" in content:
@@ -450,6 +492,7 @@ class AI(commands.Cog):
         source_message: discord.Message | None = None,
         manage_typing: bool = True,
     ):
+        chat_started = time.perf_counter()
         if isinstance(channel, discord.Message) and channel.guild:
             channel = channel.channel
         scope_type = "dm" if guild is None else "guild"
@@ -489,25 +532,65 @@ class AI(commands.Cog):
                 progress_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await progress_task
-        if action_visible_output and action_result_text:
-            if action_command_name == "help":
-                return
-            await destination.send(reply if len(reply) < 500 else "I ran it above. The command output is already in chat.")
-            return
-        await destination.send(reply)
+        send_started = time.perf_counter()
+        try:
+            if action_visible_output and action_result_text:
+                if action_command_name == "help":
+                    if source_message is not None:
+                        self._log_auto_reply(
+                            source_message,
+                            "message_send_succeeded",
+                            level=logging.INFO,
+                            send_ms=round((time.perf_counter() - send_started) * 1000, 2),
+                            total_ms=round((time.perf_counter() - chat_started) * 1000, 2),
+                            mode="help_action_output_already_sent",
+                        )
+                    return
+                await destination.send(reply if len(reply) < 500 else "I ran it above. The command output is already in chat.")
+            else:
+                await destination.send(reply)
+        except Exception as exc:
+            if source_message is not None:
+                self._log_auto_reply(
+                    source_message,
+                    "message_send_failed",
+                    level=logging.ERROR,
+                    send_ms=round((time.perf_counter() - send_started) * 1000, 2),
+                    total_ms=round((time.perf_counter() - chat_started) * 1000, 2),
+                    error=type(exc).__name__,
+                )
+            raise
+        if source_message is not None:
+            self._log_auto_reply(
+                source_message,
+                "message_send_succeeded",
+                level=logging.INFO,
+                send_ms=round((time.perf_counter() - send_started) * 1000, 2),
+                total_ms=round((time.perf_counter() - chat_started) * 1000, 2),
+            )
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        decision_started = time.perf_counter()
+        self._log_auto_reply(message, "message_received")
         if message.author.bot:
+            self._log_auto_reply(message, "ignored_because_author_is_bot")
             return
         if self.bot.user and message.author.id == self.bot.user.id:
+            self._log_auto_reply(message, "ignored_because_author_is_bot")
             return
         if getattr(message, "created_at", None) and message.created_at < (self.started_at - timedelta(seconds=1)):
+            self._log_auto_reply(message, "ignored_because_pre_startup_message")
             return
 
         # DMs always respond unless a normal command is being used.
         if isinstance(message.channel, discord.DMChannel):
-            if message.content.startswith(config.PREFIX):
+            if await self._starts_with_real_command(message):
+                self._log_auto_reply(
+                    message,
+                    "ignored_because_command",
+                    decision_ms=round((time.perf_counter() - decision_started) * 1000, 2),
+                )
                 return
             prompt_text = message.content.strip()
             if await self._maybe_handle_avatar_request(message, prompt_text):
@@ -520,7 +603,14 @@ class AI(commands.Cog):
                     if not prompt_text:
                         return
                     if not self._cooldown_ok(message.author.id, message.author.id, 2.0):
+                        self._log_auto_reply(message, "ignored_because_cooldown")
                         return
+                    self._log_auto_reply(
+                        message,
+                        "accepted_dm_reply",
+                        level=logging.INFO,
+                        decision_ms=round((time.perf_counter() - decision_started) * 1000, 2),
+                    )
                     await self._chat_and_send(
                         message.channel,
                         prompt=prompt_text,
@@ -541,29 +631,75 @@ class AI(commands.Cog):
         settings = await get_guild_settings(guild.id)
         await self._record_context(message, settings)
         if not settings["enabled"]:
+            self._log_auto_reply(
+                message,
+                "ignored_because_ai_disabled",
+                decision_ms=round((time.perf_counter() - decision_started) * 1000, 2),
+            )
             return
-        if message.content.startswith(config.PREFIX):
+        if await self._starts_with_real_command(message):
+            self._log_auto_reply(
+                message,
+                "ignored_because_command",
+                decision_ms=round((time.perf_counter() - decision_started) * 1000, 2),
+            )
             return
 
         mentioned = self.bot.user in message.mentions if self.bot.user else False
         in_ai_channel = bool(settings["channel_id"] and message.channel.id == settings["channel_id"])
         trigger = False
+        trigger_reason = ""
         if mentioned and settings["mention_enabled"]:
             trigger = True
-        elif in_ai_channel and settings["channel_chat_enabled"]:
-            trigger = not settings["smart_replies_enabled"] or self._should_auto_reply(message)
+            trigger_reason = "accepted_for_mention_reply"
+        elif mentioned and not settings["mention_enabled"]:
+            self._log_auto_reply(message, "ignored_because_mentions_disabled")
+            return
+        elif settings["channel_id"] and not in_ai_channel:
+            self._log_auto_reply(
+                message,
+                "ignored_because_wrong_channel",
+                decision_ms=round((time.perf_counter() - decision_started) * 1000, 2),
+                configured_channel_id=settings["channel_id"],
+            )
+            return
+        elif in_ai_channel and not settings["channel_chat_enabled"]:
+            self._log_auto_reply(message, "ignored_because_channel_chat_disabled")
+            return
+        elif in_ai_channel and not settings["smart_replies_enabled"]:
+            self._log_auto_reply(
+                message,
+                "ignored_because_smart_auto_replies_disabled",
+                decision_ms=round((time.perf_counter() - decision_started) * 1000, 2),
+            )
+            return
+        elif in_ai_channel and self._should_auto_reply(message):
+            trigger = True
+            trigger_reason = "accepted_for_set_auto_chat_channel"
 
         if not trigger:
+            self._log_auto_reply(
+                message,
+                "ignored_because_not_eligible",
+                decision_ms=round((time.perf_counter() - decision_started) * 1000, 2),
+            )
             return
         stripped_prompt = self._strip_bot_mention(message)
         if await self._maybe_handle_avatar_request(message, stripped_prompt):
             return
 
+        self._log_auto_reply(
+            message,
+            trigger_reason,
+            level=logging.INFO,
+            decision_ms=round((time.perf_counter() - decision_started) * 1000, 2),
+        )
         try:
             async with self._processing_feedback(message.channel):
                 attachments = await self._collect_processed_attachments(message)
                 cooldown_seconds = float(settings.get("reply_cooldown_seconds", 3) or 3)
                 if not self._cooldown_ok(message.author.id, guild.id, cooldown_seconds):
+                    self._log_auto_reply(message, "ignored_because_cooldown")
                     return
 
                 content = stripped_prompt
@@ -624,6 +760,7 @@ class AI(commands.Cog):
             await self._send_error_once(ctx.channel, ctx.author.id if ctx.guild is None else ctx.guild.id, exc)
 
     @app_commands.command(name="ai", description="Ask NightPaw AI something", extras={"category": "general"})
+    @allow_everywhere_slash()
     async def ai_slash(
         self,
         interaction: discord.Interaction,
@@ -687,6 +824,7 @@ class AI(commands.Cog):
         await ctx.send(embed=embed)
 
     @app_commands.command(name="aistatus", description="Show live AI feature awareness and config status", extras={"category": "general"})
+    @allow_everywhere_slash()
     async def aistatus_slash(self, interaction: discord.Interaction, ephemeral: bool = False):
         snapshot = build_feature_snapshot(self.bot)
         embed = render_feature_embed(snapshot)
@@ -740,104 +878,175 @@ class AI(commands.Cog):
         await ctx.send(embed=self._aidiag_embed())
 
     @app_commands.command(name="aidiag", description="Show the latest AI routing/model diagnostics", extras={"category": "general"})
+    @allow_everywhere_slash()
     async def aidiag_slash(self, interaction: discord.Interaction, ephemeral: bool = False):
         await interaction.response.send_message(embed=self._aidiag_embed(), ephemeral=ephemeral)
 
     @commands.command(name="aisetchannel", help="Set the server AI auto-chat channel")
     async def aisetchannel_prefix(self, ctx: commands.Context, channel: discord.TextChannel):
-        if not ctx.guild or not await self._is_admin_here(ctx):
-            await ctx.send(wolf_wrap("You need Manage Server permission for that here."))
+        if not await self._require_guild_admin(ctx):
             return
         await upsert_guild_settings(ctx.guild.id, channel_id=channel.id, enabled=1)
         await ctx.send(wolf_wrap(f"AI auto-chat channel set to {channel.mention}."))
 
+    @app_commands.command(name="aisetchannel", description="Set the server AI auto-chat channel", extras={"category": "aiconfig"})
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def aisetchannel_slash(self, interaction: discord.Interaction, channel: discord.TextChannel, ephemeral: bool = False):
+        if not await self._require_guild_admin_interaction(interaction):
+            return
+        await upsert_guild_settings(interaction.guild.id, channel_id=channel.id, enabled=1)
+        await interaction.response.send_message(wolf_wrap(f"AI auto-chat channel set to {channel.mention}."), ephemeral=ephemeral)
+
     @commands.command(name="aiclearchannel", help="Clear the server AI auto-chat channel")
     async def aiclearchannel_prefix(self, ctx: commands.Context):
-        if not ctx.guild or not await self._is_admin_here(ctx):
-            await ctx.send(wolf_wrap("You need Manage Server permission for that here."))
+        if not await self._require_guild_admin(ctx):
             return
         await upsert_guild_settings(ctx.guild.id, channel_id=None)
         await ctx.send(wolf_wrap("AI auto-chat channel cleared."))
 
+    @app_commands.command(name="aiclearchannel", description="Clear the server AI auto-chat channel", extras={"category": "aiconfig"})
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def aiclearchannel_slash(self, interaction: discord.Interaction, ephemeral: bool = False):
+        if not await self._require_guild_admin_interaction(interaction):
+            return
+        await upsert_guild_settings(interaction.guild.id, channel_id=None)
+        await interaction.response.send_message(wolf_wrap("AI auto-chat channel cleared."), ephemeral=ephemeral)
+
     @commands.command(name="aienable", help="Enable AI in this server")
     async def aienable_prefix(self, ctx: commands.Context):
-        if not ctx.guild or not await self._is_admin_here(ctx):
-            await ctx.send(wolf_wrap("You need Manage Server permission for that here."))
+        if not await self._require_guild_admin(ctx):
             return
         await upsert_guild_settings(ctx.guild.id, enabled=1)
         await ctx.send(wolf_wrap("AI has been enabled in this server."))
 
+    @app_commands.command(name="aienable", description="Enable AI in this server", extras={"category": "aiconfig"})
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def aienable_slash(self, interaction: discord.Interaction, ephemeral: bool = False):
+        if not await self._require_guild_admin_interaction(interaction):
+            return
+        await upsert_guild_settings(interaction.guild.id, enabled=1)
+        await interaction.response.send_message(wolf_wrap("AI has been enabled in this server."), ephemeral=ephemeral)
+
     @commands.command(name="aidisable", help="Disable AI in this server")
     async def aidisable_prefix(self, ctx: commands.Context):
-        if not ctx.guild or not await self._is_admin_here(ctx):
-            await ctx.send(wolf_wrap("You need Manage Server permission for that here."))
+        if not await self._require_guild_admin(ctx):
             return
         await upsert_guild_settings(ctx.guild.id, enabled=0)
         await ctx.send(wolf_wrap("AI has been disabled in this server."))
 
+    @app_commands.command(name="aidisable", description="Disable AI in this server", extras={"category": "aiconfig"})
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def aidisable_slash(self, interaction: discord.Interaction, ephemeral: bool = False):
+        if not await self._require_guild_admin_interaction(interaction):
+            return
+        await upsert_guild_settings(interaction.guild.id, enabled=0)
+        await interaction.response.send_message(wolf_wrap("AI has been disabled in this server."), ephemeral=ephemeral)
+
     @commands.command(name="aimentions", help="Enable or disable mention replies: on/off")
     async def aimentions_prefix(self, ctx: commands.Context, state: str):
-        if not ctx.guild or not await self._is_admin_here(ctx):
-            await ctx.send(wolf_wrap("You need Manage Server permission for that here."))
+        if not await self._require_guild_admin(ctx):
             return
         value = state.lower() in {"on", "true", "yes", "1"}
         await upsert_guild_settings(ctx.guild.id, mention_enabled=int(value))
         await ctx.send(wolf_wrap(f"Mention replies {'enabled' if value else 'disabled'}."))
 
+    @app_commands.command(name="aimentions", description="Enable or disable mention replies", extras={"category": "aiconfig"})
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def aimentions_slash(self, interaction: discord.Interaction, state: str, ephemeral: bool = False):
+        if not await self._require_guild_admin_interaction(interaction):
+            return
+        value = state.lower() in {"on", "true", "yes", "1"}
+        await upsert_guild_settings(interaction.guild.id, mention_enabled=int(value))
+        await interaction.response.send_message(wolf_wrap(f"Mention replies {'enabled' if value else 'disabled'}."), ephemeral=ephemeral)
+
     @commands.command(name="aismart", aliases=["aismartreplies"], help="Enable or disable smart auto replies: on/off")
     async def aismart_prefix(self, ctx: commands.Context, state: str):
-        if not ctx.guild or not await self._is_admin_here(ctx):
-            await ctx.send(wolf_wrap("You need Manage Server permission for that here."))
+        if not await self._require_guild_admin(ctx):
             return
         value = state.lower() in {"on", "true", "yes", "1"}
         await upsert_guild_settings(ctx.guild.id, smart_replies_enabled=int(value))
-        await ctx.send(wolf_wrap(f"Smart auto replies {'enabled' if value else 'disabled'}."))        
+        await ctx.send(wolf_wrap(f"Smart auto replies {'enabled' if value else 'disabled'}."))
+
+    @app_commands.command(name="aismart", description="Enable or disable smart auto replies", extras={"category": "aiconfig"})
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def aismart_slash(self, interaction: discord.Interaction, state: str, ephemeral: bool = False):
+        if not await self._require_guild_admin_interaction(interaction):
+            return
+        value = state.lower() in {"on", "true", "yes", "1"}
+        await upsert_guild_settings(interaction.guild.id, smart_replies_enabled=int(value))
+        await interaction.response.send_message(wolf_wrap(f"Smart auto replies {'enabled' if value else 'disabled'}."), ephemeral=ephemeral)
 
     @commands.command(name="aiactions", help="Enable or disable AI command actions in this server: on/off")
     async def aiactions_prefix(self, ctx: commands.Context, state: str):
-        if not ctx.guild or not await self._is_admin_here(ctx):
-            await ctx.send(wolf_wrap("You need Manage Server permission for that here."))
+        if not await self._require_guild_admin(ctx):
             return
         value = state.lower() in {"on", "true", "yes", "1"}
         await upsert_guild_settings(ctx.guild.id, actions_enabled=int(value))
         await ctx.send(wolf_wrap(f"AI command actions {'enabled' if value else 'disabled'} for this server."))
 
+    @app_commands.command(name="aiactions", description="Enable or disable AI command actions in this server", extras={"category": "aiconfig"})
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def aiactions_slash(self, interaction: discord.Interaction, state: str, ephemeral: bool = False):
+        if not await self._require_guild_admin_interaction(interaction):
+            return
+        value = state.lower() in {"on", "true", "yes", "1"}
+        await upsert_guild_settings(interaction.guild.id, actions_enabled=int(value))
+        await interaction.response.send_message(wolf_wrap(f"AI command actions {'enabled' if value else 'disabled'} for this server."), ephemeral=ephemeral)
+
     @commands.command(name="aiprompt", help="Set a server-specific AI instruction")
     async def aiprompt_prefix(self, ctx: commands.Context, *, prompt: str = ""):
-        if not ctx.guild or not await self._is_admin_here(ctx):
-            await ctx.send(wolf_wrap("You need Manage Server permission for that here."))
+        if not await self._require_guild_admin(ctx):
             return
         await upsert_guild_settings(ctx.guild.id, custom_prompt=prompt.strip())
         await ctx.send(wolf_wrap("Server-specific AI prompt updated." if prompt.strip() else "Server-specific AI prompt cleared."))
 
-    @commands.command(name="aiclearhistory", help="Clear AI chat history and explicit remembered facts for this DM or server")
-    async def aiclearhistory_prefix(self, ctx: commands.Context):
-        scope_type = "dm" if ctx.guild is None else "guild"
-        scope_id = ctx.author.id if ctx.guild is None else ctx.guild.id
-        if ctx.guild and not await self._is_admin_here(ctx):
-            await ctx.send(wolf_wrap("You need Manage Server permission for that here."))
+    @app_commands.command(name="aiprompt", description="Set a server-specific AI instruction", extras={"category": "aiconfig"})
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def aiprompt_slash(self, interaction: discord.Interaction, prompt: str = "", ephemeral: bool = False):
+        if not await self._require_guild_admin_interaction(interaction):
             return
-        removed = await clear_history(scope_type, scope_id)
-        await ctx.send(wolf_wrap(f"Cleared {removed} AI chat history entries and reset explicit remembered facts for this {'DM' if ctx.guild is None else 'server'}."))
+        await upsert_guild_settings(interaction.guild.id, custom_prompt=prompt.strip())
+        await interaction.response.send_message(
+            wolf_wrap("Server-specific AI prompt updated." if prompt.strip() else "Server-specific AI prompt cleared."),
+            ephemeral=ephemeral,
+        )
 
-    @commands.command(name="aisetnote", help="Store a persistent AI note about a user (admin/owner only)")
-    async def aisetnote_prefix(self, ctx: commands.Context, member: discord.User | discord.Member, *, note: str):
-        if ctx.guild and not await self._is_admin_here(ctx):
-            await ctx.send(wolf_wrap("You need Manage Server permission for that here."))
+    @commands.command(name="aiclearhistory", help="Clear AI chat history and explicit remembered facts for this server")
+    async def aiclearhistory_prefix(self, ctx: commands.Context):
+        if not await self._require_guild_admin(ctx):
             return
-        if ctx.guild is None and ctx.author.id != config.OWNER_ID:
-            await ctx.send(wolf_wrap("Only the owner can set persistent AI notes in DMs."))
+        removed = await clear_history("guild", ctx.guild.id)
+        await ctx.send(wolf_wrap(f"Cleared {removed} AI chat history entries and reset explicit remembered facts for this server."))
+
+    @app_commands.command(name="aiclearhistory", description="Clear AI chat history and explicit remembered facts for this server", extras={"category": "aiconfig"})
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def aiclearhistory_slash(self, interaction: discord.Interaction, ephemeral: bool = False):
+        if not await self._require_guild_admin_interaction(interaction):
+            return
+        removed = await clear_history("guild", interaction.guild.id)
+        await interaction.response.send_message(
+            wolf_wrap(f"Cleared {removed} AI chat history entries and reset explicit remembered facts for this server."),
+            ephemeral=ephemeral,
+        )
+
+    @commands.command(name="aisetnote", help="Store a persistent AI note about a user")
+    async def aisetnote_prefix(self, ctx: commands.Context, member: discord.User | discord.Member, *, note: str):
+        if not await self._require_guild_admin(ctx):
             return
         await set_user_note(member.id, note)
         await ctx.send(wolf_wrap(f"Stored AI note for <@{member.id}>."))
 
+    @app_commands.command(name="aisetnote", description="Store a persistent AI note about a user", extras={"category": "aiconfig"})
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def aisetnote_slash(self, interaction: discord.Interaction, member: discord.User, note: str, ephemeral: bool = False):
+        if not await self._require_guild_admin_interaction(interaction):
+            return
+        await set_user_note(member.id, note)
+        await interaction.response.send_message(wolf_wrap(f"Stored AI note for <@{member.id}>."), ephemeral=ephemeral)
+
     @commands.command(name="aigetnote", help="View a stored persistent AI note for a user")
     async def aigetnote_prefix(self, ctx: commands.Context, member: discord.User | discord.Member):
-        if ctx.guild and not await self._is_admin_here(ctx):
-            await ctx.send(wolf_wrap("You need Manage Server permission for that here."))
-            return
-        if ctx.guild is None and ctx.author.id != config.OWNER_ID:
-            await ctx.send(wolf_wrap("Only the owner can view persistent AI notes in DMs."))
+        if not await self._require_guild_admin(ctx):
             return
         note = await get_user_note(member.id)
         if not note:
@@ -845,16 +1054,31 @@ class AI(commands.Cog):
             return
         await ctx.send(wolf_wrap(f"AI note for <@{member.id}>: {note}"))
 
+    @app_commands.command(name="aigetnote", description="View a stored persistent AI note for a user", extras={"category": "aiconfig"})
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def aigetnote_slash(self, interaction: discord.Interaction, member: discord.User, ephemeral: bool = False):
+        if not await self._require_guild_admin_interaction(interaction):
+            return
+        note = await get_user_note(member.id)
+        if not note:
+            await interaction.response.send_message(wolf_wrap(f"No AI note is stored for <@{member.id}>."), ephemeral=True)
+            return
+        await interaction.response.send_message(wolf_wrap(f"AI note for <@{member.id}>: {note}"), ephemeral=ephemeral)
+
     @commands.command(name="aiclearnote", help="Remove a stored persistent AI note for a user")
     async def aiclearnote_prefix(self, ctx: commands.Context, member: discord.User | discord.Member):
-        if ctx.guild and not await self._is_admin_here(ctx):
-            await ctx.send(wolf_wrap("You need Manage Server permission for that here."))
-            return
-        if ctx.guild is None and ctx.author.id != config.OWNER_ID:
-            await ctx.send(wolf_wrap("Only the owner can clear persistent AI notes in DMs."))
+        if not await self._require_guild_admin(ctx):
             return
         removed = await clear_user_note(member.id)
         await ctx.send(wolf_wrap("AI note cleared." if removed else "There was no AI note to clear."))
+
+    @app_commands.command(name="aiclearnote", description="Remove a stored persistent AI note for a user", extras={"category": "aiconfig"})
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
+    async def aiclearnote_slash(self, interaction: discord.Interaction, member: discord.User, ephemeral: bool = False):
+        if not await self._require_guild_admin_interaction(interaction):
+            return
+        removed = await clear_user_note(member.id)
+        await interaction.response.send_message(wolf_wrap("AI note cleared." if removed else "There was no AI note to clear."), ephemeral=ephemeral)
 
 
 async def setup(bot: commands.Bot):

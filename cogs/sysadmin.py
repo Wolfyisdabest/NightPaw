@@ -537,18 +537,6 @@ class Sysadmin(commands.Cog):
         except UnicodeDecodeError:
             return discord.Embed(description=wolf_wrap("Can't read binary file as text."), color=config.BOT_COLOR)
 
-    @commands.command(name="sysinfo", help="Show system info (Owner DM only)")
-    @is_owner_dm_only()
-    async def sysinfo_prefix(self, ctx):
-        await ctx.send(embed=self._sysinfo_embed())
-
-    @app_commands.command(name="sysinfo", description="Show system info (Owner only)", extras={"category": "owner"})
-    @app_commands.allowed_installs(guilds=True, users=True)
-    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-    @is_owner_slash("Only the Alpha can use that command.")
-    async def sysinfo_slash(self, interaction: discord.Interaction, ephemeral: bool = False):
-        await interaction.response.send_message(embed=self._sysinfo_embed(), ephemeral=ephemeral)
-
     def _ls_embed(self, path: str) -> discord.Embed:
         target, query = self._resolve_path_and_query(path)
         try:
@@ -601,15 +589,13 @@ class Sysadmin(commands.Cog):
     async def readfile_slash(self, interaction: discord.Interaction, path: str, ephemeral: bool = False):
         await interaction.response.send_message(embed=self._readfile_embed(path), ephemeral=ephemeral)
 
-    @commands.command(name="botping", help="Check bot latency (Owner DM only)")
-    @is_owner_dm_only()
+    @commands.command(name="botping", help="Check bot latency")
     async def botping_prefix(self, ctx):
         await ctx.send(wolf_wrap(f"Pong! `{round(self.bot.latency * 1000)}ms`"))
 
-    @app_commands.command(name="botping", description="Check bot latency (Owner only)", extras={"category": "owner"})
+    @app_commands.command(name="botping", description="Check bot latency", extras={"category": "general"})
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-    @is_owner_slash("Only the Alpha can use that command.")
     async def botping_slash(self, interaction: discord.Interaction, ephemeral: bool = False):
         await interaction.response.send_message(wolf_wrap(f"Pong! `{round(self.bot.latency * 1000)}ms`"), ephemeral=ephemeral)
 

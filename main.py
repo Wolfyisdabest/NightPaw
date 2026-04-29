@@ -16,6 +16,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
+from checks import check_already_responded
 from config import wolf_wrap
 from services.ai_state import ensure_schema as ensure_ai_schema
 from services.db import ensure_data_dir
@@ -540,6 +541,8 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
     if isinstance(error, commands.CheckFailure):
+        if check_already_responded(ctx):
+            return
         logging.warning(f"[CMD DENIED] {ctx.author} ({ctx.author.id}) tried !{ctx.command} — check failed", extra={"context": f" guild={getattr(ctx.guild, 'name', 'DM')} channel={getattr(ctx.channel, 'id', None)} content={ctx.message.content[:1000]}"})
         await ctx.send(wolf_wrap("You don't have the authority to use that command."))
         return
@@ -592,6 +595,8 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         return
 
     if isinstance(error, app_commands.CheckFailure):
+        if check_already_responded(interaction):
+            return
         logging.warning(f"[SLASH DENIED] {interaction.user} ({interaction.user.id}) tried /{cmd_name} — check failed", extra={"context": f" guild={getattr(interaction.guild, 'name', 'DM')} channel={getattr(interaction.channel, 'id', None)}"})
         try:
             await interaction.response.send_message(

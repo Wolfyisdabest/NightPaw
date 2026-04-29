@@ -97,7 +97,7 @@ def infer_command_category(
         "aigetnote", "aiclearnote",
     }
     if lower_name in admin_names:
-        return "serveradmin"
+        return "aiconfig"
 
     if "admin/owner only" in combined:
         return "serveradmin"
@@ -140,8 +140,8 @@ def infer_command_section(
 
     combined = normalize_message(f"{command_name} {module_name} {cog_name}")
     if any(token in combined for token in ("cogs.ai", " ai ", "ai.")) or command_name.startswith("ai"):
-        if infer_command_category(prefix_cmd=prefix_cmd, slash_cmd=slash_cmd) == "serveradmin":
-            return "serveradmin"
+        if infer_command_category(prefix_cmd=prefix_cmd, slash_cmd=slash_cmd) == "aiconfig":
+            return "aiconfig"
         return "ai"
     if any(token in combined for token in ("moderation", "automod")):
         return "moderation"

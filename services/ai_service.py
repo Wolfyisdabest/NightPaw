@@ -552,6 +552,7 @@ class AIService:
         action_meta: dict[str, Any] | None = None,
         **_: Any,
     ) -> str:
+        started = time.perf_counter()
         logger.info(
             "AI reply requested",
             extra={
@@ -661,6 +662,7 @@ class AIService:
             )
             return focused[:1900]
 
+        context_started = time.perf_counter()
         try:
             history = await get_history(scope_type, scope_id, limit=12)
         except Exception:
@@ -688,7 +690,19 @@ class AIService:
         except Exception:
             runtime_block = "Runtime facts are partially unavailable right now, so stay conservative and do not guess."
             runtime_sections = []
+        logger.info(
+            "AI context/history loaded",
+            extra={
+                "context": (
+                    f" scope={scope_type}:{scope_id} history={len(history)} "
+                    f"memories={self.last_run_info.get('memories_loaded_count', 0)} "
+                    f"runtime_sections={self.last_run_info.get('runtime_sections_included')} "
+                    f"elapsed_ms={round((time.perf_counter() - context_started) * 1000, 2)}"
+                )
+            },
+        )
 
+        prompt_started = time.perf_counter()
         attachment_context = render_attachment_context(attachments) if attachments else ""
         if attachments and attachments.has_images:
             attachment_context = await self._augment_attachment_context_with_vision(
@@ -738,6 +752,16 @@ class AIService:
             if images:
                 user_message["images"] = images
         messages.append(user_message)
+        logger.info(
+            "AI prompt construction completed",
+            extra={
+                "context": (
+                    f" scope={scope_type}:{scope_id} custom_prompt={'yes' if custom_prompt.strip() else 'no'} "
+                    f"attachment_context={'yes' if bool(attachment_context) else 'no'} "
+                    f"messages={len(messages)} elapsed_ms={round((time.perf_counter() - prompt_started) * 1000, 2)}"
+                )
+            },
+        )
 
         reply_text = await self._chat(messages, attachments=attachments, force_model=self.model)
         self.last_run_info["chat_model_used"] = self.model
@@ -757,6 +781,12 @@ class AIService:
             display_name=display_name,
             user_text=user_text,
             assistant_text=reply_text,
+        )
+        logger.info(
+            "AI reply completed",
+            extra={
+                "context": f" scope={scope_type}:{scope_id} elapsed_ms={round((time.perf_counter() - started) * 1000, 2)}"
+            },
         )
         return reply_text
 
@@ -966,6 +996,7 @@ class AIService:
         temperature: float | None = None,
     ) -> str:
         model_name = force_model or self._select_model(attachments)
+        started = time.perf_counter()
         payload: dict[str, Any] = {
             "model": model_name,
             "messages": messages,
@@ -975,6 +1006,15 @@ class AIService:
             },
         }
 
+        logger.info(
+            "Ollama request started",
+            extra={
+                "context": (
+                    f" model={model_name} messages={len(messages)} "
+                    f"attachments={len(attachments.attachments) if attachments else 0}"
+                )
+            },
+        )
         session = await self._get_session()
         async with session.post(
             f"{self.url}/api/chat",
@@ -993,6 +1033,12 @@ class AIService:
                     raise RuntimeError(f"Image analysis failed via Ollama HTTP {resp.status}: {text[:300]}")
                 raise RuntimeError(f"Ollama HTTP {resp.status}: {text[:400]}")
             data = json.loads(text)
+        logger.info(
+            "Ollama response completed",
+            extra={
+                "context": f" model={model_name} elapsed_ms={round((time.perf_counter() - started) * 1000, 2)}"
+            },
+        )
 
         content = (data.get("message", {}) or {}).get("content", "").strip()
         if not content:

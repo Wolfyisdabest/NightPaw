@@ -21,6 +21,7 @@ SECTION_META: dict[str, tuple[str, str, str]] = {
     "overview": ("📚", "Overview", "High-level bot info, visible command totals, and quick usage guidance."),
     "ranks": ("🏷️", "Ranks", "How NightPaw access levels work and what each rank can see."),
     "ai": ("🧠", "AI", "Chat, memory, routing, and NightPaw AI controls."),
+    "aiconfig": ("⚙️", "AI Config", "Server-only AI configuration commands for channels, prompts, and reply behavior."),
     "utility": ("🧰", "Utility", "Daily-use tools, reminders, lookups, and practical helpers."),
     "lore": ("🌙", "Lore", "Character profiles, wolf lore, and worldbuilding commands."),
     "pack": ("🤝", "Pack", "Trusted pack visibility and pack-related commands."),
@@ -33,6 +34,7 @@ SECTION_META: dict[str, tuple[str, str, str]] = {
 ACCESS_BADGES = {
     "general": "",
     "trusted": "Pack",
+    "aiconfig": "ServerAdmin",
     "serveradmin": "ServerAdmin",
     "owner": "Alpha",
 }
@@ -342,7 +344,7 @@ class Help(commands.Cog):
     def _has_access(self, access: str, *, trusted: bool, is_admin: bool, is_owner: bool) -> bool:
         if access == "owner":
             return is_owner
-        if access == "serveradmin":
+        if access in {"serveradmin", "aiconfig"}:
             return is_admin
         if access == "trusted":
             return trusted
