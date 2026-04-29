@@ -1362,13 +1362,21 @@ function Get-ReleaseNotesMarkdown {
 function Invoke-GitHubReleaseCreate {
     param(
         [Parameter(Mandatory)][string]$Tag,
-        [Parameter(Mandatory)][string[]]$Notes,
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string[]]$Notes,
         [switch]$UseTagNotesFallback
     )
 
     if (-not (Test-CommandAvailable -Name 'gh')) {
         Write-WarnLine 'GitHub CLI is not available. You can create the GitHub release manually later.'
         return $false
+    }
+
+    $noteLines = @($Notes)
+    $hasVisibleNotes = @($noteLines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0
+    if (-not $hasVisibleNotes) {
+        throw "Generated release notes for $Tag are empty. Aborting before calling gh release create."
     }
 
     if ($UseTagNotesFallback) {
@@ -1380,7 +1388,7 @@ function Invoke-GitHubReleaseCreate {
     else {
         $notesPath = [System.IO.Path]::GetTempFileName()
         try {
-            Set-Content -LiteralPath $notesPath -Value $Notes -Encoding UTF8
+            Set-Content -LiteralPath $notesPath -Value $noteLines -Encoding UTF8
             & gh release create $Tag --title $Tag --notes-file $notesPath
             if ($LASTEXITCODE -ne 0) {
                 throw "gh release create failed with exit code $LASTEXITCODE."
@@ -2124,6 +2132,7 @@ function Invoke-ReleaseFlow {
     }
 
     $didPush = $false
+    $branchPushCompleted = $false
     $tagAvailableOnRemote = $false
     $shouldPush = $PushAfterTag
     if ($analysis.IsDetachedHead) {
@@ -2144,6 +2153,7 @@ function Invoke-ReleaseFlow {
             $didPush = $pushResult.Succeeded
             $tagAvailableOnRemote = $pushResult.TagAvailableOnRemote
             $releaseState = Get-ReleaseStateSnapshot -Tag $analysis.ProposedVersion -Branch $analysis.Branch -IsDetachedHead:$analysis.IsDetachedHead
+            $branchPushCompleted = ($releaseState.BranchSync.Status -eq 'aligned')
 
             if ($pushResult.Succeeded) {
                 if ($includeTags) {
@@ -2179,6 +2189,9 @@ function Invoke-ReleaseFlow {
             Write-InfoLine ("git push origin {0} --tags" -f $analysis.Branch)
         }
     }
+    elseif ($releaseState.RemoteTagExists -and $releaseState.BranchSync.Status -eq 'aligned') {
+        $branchPushCompleted = $true
+    }
 
     $shouldCreateGitHubRelease = $false
     $releaseState = Get-ReleaseStateSnapshot -Tag $analysis.ProposedVersion -Branch $analysis.Branch -IsDetachedHead:$analysis.IsDetachedHead
@@ -2190,7 +2203,7 @@ function Invoke-ReleaseFlow {
             }
             return
         }
-        if ($releaseState.RemoteTagExists -and $releaseState.BranchSync.Status -eq 'aligned') {
+        if ($branchPushCompleted -and $releaseState.RemoteTagExists -and $releaseState.BranchSync.Status -eq 'aligned') {
             $shouldCreateGitHubRelease = $true
         }
         elseif ($releaseState.RemoteTagExists) {
@@ -2199,6 +2212,9 @@ function Invoke-ReleaseFlow {
         else {
             Write-WarnLine 'GitHub release creation was skipped because the release tag is not available on origin yet.'
         }
+    }
+    elseif ($shouldPush -and -not $branchPushCompleted) {
+        Write-WarnLine 'GitHub release creation was skipped because the branch push did not complete cleanly.'
     }
     elseif ($releaseState.RemoteTagExists -and $releaseState.BranchSync.Status -eq 'aligned' -and (Test-CommandAvailable -Name 'gh')) {
         $shouldCreateGitHubRelease = Confirm-Action -Prompt 'Create GitHub release with gh now? [y/N]'
