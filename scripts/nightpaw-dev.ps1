@@ -1696,7 +1696,9 @@ function Get-ChangelogPreview {
 function Write-ChangelogFile {
     param(
         [Parameter(Mandatory)][string]$ChangelogPath,
-        [Parameter(Mandatory)][string[]]$ContentLines
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string[]]$ContentLines
     )
 
     Set-Content -LiteralPath $ChangelogPath -Value $ContentLines -Encoding UTF8
