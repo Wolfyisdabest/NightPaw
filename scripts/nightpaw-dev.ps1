@@ -1625,6 +1625,179 @@ function Get-ResolvedReleaseBumpType {
     }
 }
 
+function ConvertFrom-SemVerTag {
+    param([string]$Tag)
+
+    if (-not (Test-IsSemVerTag -Tag $Tag)) {
+        return $null
+    }
+
+    $parts = $Tag.TrimStart('v').Split('.')
+    return [pscustomobject]@{
+        Tag = $Tag
+        Major = [int]$parts[0]
+        Minor = [int]$parts[1]
+        Patch = [int]$parts[2]
+    }
+}
+
+function Compare-SemVerTags {
+    param(
+        [string]$LeftTag,
+        [string]$RightTag
+    )
+
+    $left = ConvertFrom-SemVerTag -Tag $LeftTag
+    $right = ConvertFrom-SemVerTag -Tag $RightTag
+
+    if ($null -eq $left -or $null -eq $right) {
+        throw 'Compare-SemVerTags requires two valid semver tags.'
+    }
+
+    if ($left.Major -ne $right.Major) {
+        return [Math]::Sign($left.Major - $right.Major)
+    }
+    if ($left.Minor -ne $right.Minor) {
+        return [Math]::Sign($left.Minor - $right.Minor)
+    }
+    return [Math]::Sign($left.Patch - $right.Patch)
+}
+
+function Get-HighestSemVerTag {
+    param([string[]]$Tags)
+
+    $validTags = @($Tags | Where-Object { Test-IsSemVerTag -Tag $_ } | Sort-Object -Unique)
+    if ($validTags.Count -eq 0) {
+        return $null
+    }
+
+    $highest = $validTags[0]
+    foreach ($tag in $validTags[1..($validTags.Count - 1)]) {
+        if ((Compare-SemVerTags -LeftTag $tag -RightTag $highest) -gt 0) {
+            $highest = $tag
+        }
+    }
+    return $highest
+}
+
+function Get-AllLocalSemVerTags {
+    $result = Invoke-Git -Arguments @('tag', '--list') -AllowFailure
+    if ($result.ExitCode -ne 0) {
+        return @()
+    }
+
+    return @($result.Output | Where-Object { Test-IsSemVerTag -Tag $_ } | Sort-Object -Unique)
+}
+
+function Get-AllRemoteSemVerTags {
+    $result = Invoke-Git -Arguments @('ls-remote', '--tags', 'origin') -AllowFailure
+    if ($result.ExitCode -ne 0) {
+        return [pscustomobject]@{
+            Checked = $false
+            Tags = @()
+        }
+    }
+
+    $tags = New-Object System.Collections.Generic.List[string]
+    foreach ($line in @($result.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        $parts = $line -split '\s+'
+        if ($parts.Count -lt 2) {
+            continue
+        }
+
+        $refName = $parts[1].Trim()
+        if ($refName -notlike 'refs/tags/*') {
+            continue
+        }
+
+        $tagName = $refName.Substring('refs/tags/'.Length)
+        if ($tagName.EndsWith('^{}')) {
+            $tagName = $tagName.Substring(0, $tagName.Length - 3)
+        }
+
+        if (Test-IsSemVerTag -Tag $tagName) {
+            $tags.Add($tagName)
+        }
+    }
+
+    return [pscustomobject]@{
+        Checked = $true
+        Tags = @($tags | Sort-Object -Unique)
+    }
+}
+
+function Get-GitHubReleaseTags {
+    if (-not (Test-CommandAvailable -Name 'gh')) {
+        return [pscustomobject]@{
+            Checked = $false
+            Tags = @()
+            Status = 'gh unavailable'
+        }
+    }
+
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $previousErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& gh release list --limit 100 --json tagName 2>$stderrPath)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorPreference
+    }
+
+    $stderrLines = @()
+    if (Test-Path -LiteralPath $stderrPath) {
+        $stderrLines = @(Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue)
+        Remove-Item -LiteralPath $stderrPath -ErrorAction SilentlyContinue
+    }
+
+    if ($exitCode -ne 0) {
+        return [pscustomobject]@{
+            Checked = $false
+            Tags = @()
+            Status = (($stderrLines -join ' ').Trim())
+        }
+    }
+
+    $jsonText = ($output -join "`n").Trim()
+    $tags = @()
+    if (-not [string]::IsNullOrWhiteSpace($jsonText)) {
+        try {
+            $items = $jsonText | ConvertFrom-Json
+            $tags = @($items | ForEach-Object { [string]$_.tagName } | Where-Object { Test-IsSemVerTag -Tag $_ } | Sort-Object -Unique)
+        }
+        catch {
+            $tags = @()
+        }
+    }
+
+    return [pscustomobject]@{
+        Checked = $true
+        Tags = @($tags)
+        Status = 'ok'
+    }
+}
+
+function Get-ReservedReleaseVersions {
+    $localTags = @(Get-AllLocalSemVerTags)
+    $remoteInfo = Get-AllRemoteSemVerTags
+    $releaseInfo = Get-GitHubReleaseTags
+    $allTags = @($localTags + @($remoteInfo.Tags) + @($releaseInfo.Tags) | Where-Object { Test-IsSemVerTag -Tag $_ } | Sort-Object -Unique)
+    $highestReserved = Get-HighestSemVerTag -Tags $allTags
+
+    return [pscustomobject]@{
+        Tags = @($allTags)
+        Highest = $highestReserved
+        LocalTags = @($localTags)
+        RemoteChecked = $remoteInfo.Checked
+        RemoteTags = @($remoteInfo.Tags)
+        GitHubChecked = $releaseInfo.Checked
+        GitHubTags = @($releaseInfo.Tags)
+        GitHubStatus = $releaseInfo.Status
+    }
+}
+
 function Get-NextVersion {
     param(
         [string]$LatestTag,
@@ -1655,6 +1828,21 @@ function Get-NextVersion {
     }
 }
 
+function Get-NextAvailableVersion {
+    param(
+        [string]$BaseTag,
+        [string]$BumpType,
+        [string[]]$ReservedTags
+    )
+
+    $candidate = Get-NextVersion -LatestTag $BaseTag -BumpType $BumpType
+    $reserved = @($ReservedTags | Where-Object { Test-IsSemVerTag -Tag $_ } | Sort-Object -Unique)
+    while ($reserved -contains $candidate) {
+        $candidate = Get-NextVersion -LatestTag $candidate -BumpType 'patch'
+    }
+    return $candidate
+}
+
 function Get-CommitMessagesSinceTag {
     param([string]$LatestTag)
     return @(Get-CommitObjectsSinceTag -PreviousTag $LatestTag | ForEach-Object { $_.Subject })
@@ -1672,6 +1860,7 @@ function Get-ReleaseAnalysis {
     if ($null -ne $latestTag -and -not (Test-IsSemVerTag -Tag $latestTag)) {
         throw "Latest tag '$latestTag' is not in vMAJOR.MINOR.PATCH format."
     }
+    $reservedVersions = Get-ReservedReleaseVersions
 
     $branchInfo = Get-CurrentBranchInfo
     $status = Get-GitStatus
@@ -1758,6 +1947,11 @@ function Get-ReleaseAnalysis {
 
     return [pscustomobject]@{
         LatestTag = $latestTag
+        HighestReservedVersion = $reservedVersions.Highest
+        ReservedVersions = @($reservedVersions.Tags)
+        RemoteVersionCheckSucceeded = $reservedVersions.RemoteChecked
+        GitHubVersionCheckSucceeded = $reservedVersions.GitHubChecked
+        GitHubVersionCheckStatus = $reservedVersions.GitHubStatus
         Branch = $branchInfo.Name
         IsDetachedHead = $branchInfo.IsDetached
         Status = $status
@@ -1774,7 +1968,7 @@ function Get-ReleaseAnalysis {
         ReleaseRecommended = $releaseNeeded
         Reasons = @($reasons)
         BumpType = $bumpType
-        ProposedVersion = Get-NextVersion -LatestTag $latestTag -BumpType $bumpType
+        ProposedVersion = Get-NextAvailableVersion -BaseTag $latestTag -BumpType $bumpType -ReservedTags $reservedVersions.Tags
     }
 }
 
@@ -1792,7 +1986,8 @@ function Invoke-ReleaseFlow {
     $releaseState = Get-ReleaseStateSnapshot -Tag $analysis.ProposedVersion -Branch $analysis.Branch -IsDetachedHead:$analysis.IsDetachedHead
 
     Write-Header 'NightPaw Release Helper'
-    Write-InfoLine ("Latest tag: {0}" -f $(if ($analysis.LatestTag) { $analysis.LatestTag } else { 'none' }))
+    Write-InfoLine ("Latest reachable tag: {0}" -f $(if ($analysis.LatestTag) { $analysis.LatestTag } else { 'none' }))
+    Write-InfoLine ("Highest reserved version: {0}" -f $(if ($analysis.HighestReservedVersion) { $analysis.HighestReservedVersion } else { 'none' }))
     Write-InfoLine ("Current branch: {0}" -f $analysis.Branch)
     Write-InfoLine ("Working tree clean: {0}" -f $(if ($analysis.Status.IsClean) { 'yes' } else { 'no' }))
     Write-InfoLine ("Release recommended: {0}" -f $(if ($analysis.ReleaseRecommended) { 'yes' } else { 'no' }))
