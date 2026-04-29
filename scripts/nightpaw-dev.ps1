@@ -879,7 +879,7 @@ function Get-CommitObjectsSinceTag {
     }
 
     $records = @($raw -split [char]0x1e | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $commits = New-Object System.Collections.Generic.List[object]
+    $commits = @()
     foreach ($record in $records) {
         $parts = $record.Trim() -split [char]0x1f, 4
         if ($parts.Count -lt 3) {
@@ -889,13 +889,13 @@ function Get-CommitObjectsSinceTag {
         $body = if ($parts.Count -ge 4) { $parts[3].Trim() } else { '' }
         $subject = $parts[2].Trim()
         $lineText = "{0} {1}" -f $parts[1].Trim(), $subject
-        $commits.Add([pscustomobject]@{
+        $commits += [pscustomobject]@{
             Hash = $parts[0].Trim()
             ShortHash = $parts[1].Trim()
             Subject = $subject
             Body = $body
             Line = $lineText
-        })
+        }
     }
 
     return @($commits)
@@ -1748,7 +1748,11 @@ function Show-MainMenu {
         Write-InfoLine '9. Show help'
         Write-InfoLine '10. Exit'
 
-        $choice = (Read-Host 'Choose an option').Trim()
+        $rawChoice = Read-Host 'Choose an option'
+        if ($null -eq $rawChoice) {
+            return
+        }
+        $choice = $rawChoice.Trim()
         switch ($choice) {
             '1' { Show-ProjectStatus }
             '2' { Show-CommitContext }
