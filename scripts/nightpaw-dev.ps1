@@ -510,18 +510,37 @@ function Get-RecentCommitSubjects {
     return @($result.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
-function Get-SuggestedCommitType {
-    param(
-        [string[]]$ChangedPaths,
-        [string[]]$RecentCommitSubjects
-    )
+function Get-TrackedDiffPreview {
+    param([int]$MaxLines = 120)
 
-    if (-not $ChangedPaths -or $ChangedPaths.Count -eq 0) {
-        return 'chore'
+    Assert-GitRepository
+    $result = Invoke-Git -Arguments @('diff', 'HEAD', '--no-ext-diff', '--no-color', '--unified=0', '--minimal') -AllowFailure
+    if ($result.ExitCode -ne 0) {
+        return ''
     }
 
-    $normalized = @($ChangedPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.ToLowerInvariant() })
-    $docsOnly = ($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(readme\.md|docs/|changelog\.md$)' }).Count -eq 0)
+    $lines = @($result.Output | Select-Object -First $MaxLines)
+    if ($lines.Count -eq 0) {
+        return ''
+    }
+
+    return ($lines -join "`n")
+}
+
+function Get-CommitHintSignals {
+    param(
+        [string[]]$ChangedPaths,
+        [string]$DiffText
+    )
+
+    $normalized = @(
+        $ChangedPaths |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { $_.ToLowerInvariant() }
+    )
+    $diffLower = if ([string]::IsNullOrWhiteSpace($DiffText)) { '' } else { $DiffText.ToLowerInvariant() }
+
+    $docsOnly = ($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(readme\.md|docs/|changelog\.md$|license$)' }).Count -eq 0)
     $testsOnly = ($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(tests/|test_.*\.py$)' }).Count -eq 0)
     $scriptsOnly = ($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(scripts/|readme\.md|docs/|changelog\.md$)' }).Count -eq 0)
     $ciOnly = ($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(\.github/|github/)' }).Count -eq 0)
@@ -533,51 +552,168 @@ function Get-SuggestedCommitType {
     $hasUserFacingCode = @($normalized | Where-Object {
         $_ -eq 'main.py' -or $_ -eq 'config.py' -or $_ -eq 'checks.py' -or $_ -like 'services/*.py' -or $_ -like 'cogs/*.py'
     }).Count -gt 0
+
+    $hasReleaseFlow = ($diffLower -match 'push commit and tags to origin now' -or $diffLower -match 'create github release' -or $diffLower -match 'gh release create' -or $diffLower -match 'pushtag' -or $diffLower -match 'creategithubrelease')
+    $hasReleaseNotes = ($diffLower -match 'notes-file' -or $diffLower -match 'generated release notes preview' -or $diffLower -match 'notes-from-tag' -or $diffLower -match 'groupedreleasenotes')
+    $hasCommitHeuristics = ($diffLower -match 'suggestedcommittype' -or $diffLower -match 'suggestedcommitmessage' -or $diffLower -match 'commit suggestion' -or $diffLower -match 'commit subject')
+    $hasBotCheck = (@($normalized | Where-Object { $_ -eq 'scripts/nightpaw-dev.ps1' }).Count -gt 0) -and ($diffLower -match 'bot check|invokepythoncandidates|compileall|success')
+    $hasRustCheck = (@($normalized | Where-Object { $_ -eq 'scripts/nightpaw-dev.ps1' }).Count -gt 0) -and ($diffLower -match 'rust helper check|cargo test|maturin|nightpaw_rs')
+    $hasMenuFlow = (@($normalized | Where-Object { $_ -eq 'scripts/nightpaw-dev.ps1' }).Count -gt 0) -and ($diffLower -match 'nightpaw developer console|choose an option|argument types do not match')
+    $hasWrapperChanges = @($normalized | Where-Object { $_ -match '^scripts/(commit|commit_context|dev|release)\.ps1$' }).Count -gt 0
+    $hasLicenseDocs = @($normalized | Where-Object { $_ -eq 'license' -or $_ -eq 'readme.md' }).Count -gt 0 -and ($diffLower -match 'gnu affero|agpl|license')
+
+    return [pscustomobject]@{
+        Normalized = $normalized
+        DiffText = $diffLower
+        DocsOnly = $docsOnly
+        TestsOnly = $testsOnly
+        ScriptsOnly = $scriptsOnly
+        CiOnly = $ciOnly
+        HasRustHelper = $hasRustHelper
+        HasBuildFiles = $hasBuildFiles
+        HasPerfHints = $hasPerfHints
+        HasUserFacingCode = $hasUserFacingCode
+        HasReleaseFlow = $hasReleaseFlow
+        HasReleaseNotes = $hasReleaseNotes
+        HasCommitHeuristics = $hasCommitHeuristics
+        HasBotCheck = $hasBotCheck
+        HasRustCheck = $hasRustCheck
+        HasMenuFlow = $hasMenuFlow
+        HasWrapperChanges = $hasWrapperChanges
+        HasLicenseDocs = $hasLicenseDocs
+    }
+}
+
+function Get-UniqueCommitSuggestion {
+    param(
+        [string[]]$Candidates,
+        [string[]]$RecentCommitSubjects
+    )
+
+    $recentNormalized = @(
+        $RecentCommitSubjects |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { $_.Trim().ToLowerInvariant() }
+    )
+
+    foreach ($candidate in @($Candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        $normalizedCandidate = $candidate.Trim().ToLowerInvariant()
+        if ($recentNormalized -notcontains $normalizedCandidate) {
+            return $candidate.Trim()
+        }
+    }
+
+    return (@($Candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1) + @('update current changes'))[0]
+}
+
+function Get-SuggestedCommitType {
+    param(
+        [string[]]$ChangedPaths,
+        [string[]]$RecentCommitSubjects,
+        [string]$DiffText
+    )
+
+    if (-not $ChangedPaths -or $ChangedPaths.Count -eq 0) {
+        return 'chore'
+    }
+
+    $signals = Get-CommitHintSignals -ChangedPaths $ChangedPaths -DiffText $DiffText
     $recentText = ((@($RecentCommitSubjects | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n")).ToLowerInvariant()
 
-    if ($docsOnly) { return 'docs' }
-    if ($testsOnly) { return 'test' }
-    if ($ciOnly) { return 'ci' }
-    if ($scriptsOnly) { return 'chore' }
-    if ($hasRustHelper) { return 'feat' }
-    if ($hasBuildFiles -and -not $hasUserFacingCode) { return 'build' }
-    if ($hasPerfHints -and $recentText -match 'perf') { return 'perf' }
-    if ($hasUserFacingCode) { return 'feat' }
-    if ($hasBuildFiles) { return 'build' }
+    if ($signals.DocsOnly) { return 'docs' }
+    if ($signals.TestsOnly) { return 'test' }
+    if ($signals.CiOnly) { return 'ci' }
+    if ($signals.HasRustHelper) { return 'feat' }
+    if ($signals.HasBuildFiles -and -not $signals.HasUserFacingCode) { return 'build' }
+    if ($signals.HasPerfHints -and $recentText -match 'perf') { return 'perf' }
+    if ($signals.ScriptsOnly) {
+        if ($signals.HasBotCheck -or $signals.HasMenuFlow -or $signals.HasCommitHeuristics) { return 'fix' }
+        if ($signals.HasReleaseFlow -or $signals.HasReleaseNotes) { return 'feat' }
+        if ($signals.HasWrapperChanges) { return 'refactor' }
+        return 'chore'
+    }
+    if ($signals.HasUserFacingCode) { return 'feat' }
+    if ($signals.HasBuildFiles) { return 'build' }
     return 'refactor'
 }
 
 function Get-SuggestedCommitMessage {
     param(
         [string]$CommitType,
-        [string[]]$ChangedPaths
+        [string[]]$ChangedPaths,
+        [string[]]$RecentCommitSubjects,
+        [string]$DiffText
     )
 
-    $normalized = @($ChangedPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.ToLowerInvariant() })
+    $signals = Get-CommitHintSignals -ChangedPaths $ChangedPaths -DiffText $DiffText
+    $normalized = @($signals.Normalized)
 
-    if (@($normalized | Where-Object {
-        $_ -like 'crates/*' -or $_ -eq 'services/rust_bridge.py' -or $_ -eq 'tests/test_rust_bridge.py'
-    }).Count -gt 0) {
+    if ($signals.HasRustHelper) {
         return 'add optional Rust-backed service helpers'
     }
-    if (($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(readme\.md|docs/|changelog\.md$)' }).Count -eq 0)) {
+    if ($signals.DocsOnly) {
+        if ($signals.HasLicenseDocs) {
+            return 'document AGPL licensing requirements'
+        }
+        if (@($normalized | Where-Object { $_ -eq 'docs/dev-helper.md' -or $_ -match '^scripts/' }).Count -gt 0) {
+            return 'document developer helper workflow'
+        }
         return 'update developer documentation'
     }
-    if (($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^scripts/' }).Count -eq 0)) {
-        return 'unify developer console helper workflow'
+    if ($signals.TestsOnly) {
+        $testPath = @($normalized | Where-Object { $_ -like 'tests/*' } | Select-Object -First 1)
+        if ($testPath.Count -gt 0) {
+            return ("add coverage for {0}" -f ([System.IO.Path]::GetFileNameWithoutExtension($testPath[0]).Replace('_', ' ')))
+        }
+    }
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if ($signals.ScriptsOnly) {
+        if ($signals.HasCommitHeuristics) {
+            $candidates.Add('improve commit suggestion heuristics')
+            $candidates.Add('fix developer console commit suggestions')
+        }
+        if ($signals.HasReleaseNotes) {
+            $candidates.Add('generate GitHub release notes from commit history')
+            $candidates.Add('improve generated release notes')
+        }
+        if ($signals.HasReleaseFlow) {
+            $candidates.Add('restore guided release push and publish flow')
+            $candidates.Add('improve developer console release flow')
+        }
+        if ($signals.HasBotCheck) {
+            $candidates.Add('fix developer console bot check handling')
+        }
+        if ($signals.HasRustCheck) {
+            $candidates.Add('improve Rust helper validation flow')
+        }
+        if ($signals.HasMenuFlow) {
+            $candidates.Add('fix developer console menu action handling')
+        }
+        if ($signals.HasWrapperChanges) {
+            $candidates.Add('align helper wrapper argument forwarding')
+        }
     }
 
     switch ($CommitType) {
-        'docs' { return 'update project documentation' }
-        'test' { return 'add coverage for current changes' }
-        'build' { return 'update development dependencies' }
-        'ci' { return 'adjust CI workflow behavior' }
-        'refactor' { return 'refactor internal helper flow' }
-        'chore' { return 'refresh development tooling' }
-        'perf' { return 'improve helper performance' }
-        'fix' { return 'fix current helper behavior' }
-        default { return 'add developer workflow improvements' }
+        'docs' { $candidates.Add('update project documentation') }
+        'test' { $candidates.Add('add coverage for current changes') }
+        'build' { $candidates.Add('update development dependencies') }
+        'ci' { $candidates.Add('adjust CI workflow behavior') }
+        'refactor' { $candidates.Add('refine developer console helper structure') }
+        'chore' { $candidates.Add('refresh developer tooling') }
+        'perf' { $candidates.Add('improve helper performance') }
+        'fix' {
+            $candidates.Add('fix developer console helper behavior')
+            $candidates.Add('fix current helper flow')
+        }
+        default {
+            $candidates.Add('add developer workflow improvements')
+            $candidates.Add('expand developer console workflow')
+        }
     }
+
+    return Get-UniqueCommitSuggestion -Candidates @($candidates) -RecentCommitSubjects $RecentCommitSubjects
 }
 
 function Get-CommitTypeMenuSelection {
@@ -719,8 +855,9 @@ function Show-CommitContext {
     Assert-GitRepository
     $changed = Get-ChangedFiles
     $recentCommits = Get-RecentCommitSubjects -Count 8
-    $suggestedType = Get-SuggestedCommitType -ChangedPaths $changed.All -RecentCommitSubjects $recentCommits
-    $suggestedMessage = Get-SuggestedCommitMessage -CommitType $suggestedType -ChangedPaths $changed.All
+    $diffPreview = Get-TrackedDiffPreview
+    $suggestedType = Get-SuggestedCommitType -ChangedPaths $changed.All -RecentCommitSubjects $recentCommits -DiffText $diffPreview
+    $suggestedMessage = Get-SuggestedCommitMessage -CommitType $suggestedType -ChangedPaths $changed.All -RecentCommitSubjects $recentCommits -DiffText $diffPreview
 
     Show-ProjectStatus
 
@@ -755,8 +892,9 @@ function Invoke-CommitFlow {
 
     $changed = Get-ChangedFiles
     $recentCommits = Get-RecentCommitSubjects -Count 8
-    $suggestedType = Get-SuggestedCommitType -ChangedPaths $changed.All -RecentCommitSubjects $recentCommits
-    $suggestedMessage = Get-SuggestedCommitMessage -CommitType $suggestedType -ChangedPaths $changed.All
+    $diffPreview = Get-TrackedDiffPreview
+    $suggestedType = Get-SuggestedCommitType -ChangedPaths $changed.All -RecentCommitSubjects $recentCommits -DiffText $diffPreview
+    $suggestedMessage = Get-SuggestedCommitMessage -CommitType $suggestedType -ChangedPaths $changed.All -RecentCommitSubjects $recentCommits -DiffText $diffPreview
 
     Show-CommitContext
 
