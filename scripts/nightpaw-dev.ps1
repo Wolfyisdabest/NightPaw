@@ -192,13 +192,14 @@ function Invoke-PythonCandidates {
     $lastFailure = $null
     foreach ($candidate in (Get-PythonCandidates)) {
         try {
-            & $candidate.Command @($candidate.PrefixArgs + $Arguments)
+            $commandOutput = & $candidate.Command @($candidate.PrefixArgs + $Arguments) 2>&1
             if ($LASTEXITCODE -eq 0) {
                 return [pscustomobject]@{
                     Success = $true
                     Command = $candidate.Command
                     PrefixArgs = @($candidate.PrefixArgs)
                     ExitCode = 0
+                    Output = @($commandOutput | ForEach-Object { "$_" })
                 }
             }
 
@@ -207,6 +208,7 @@ function Invoke-PythonCandidates {
                 Command = $candidate.Command
                 PrefixArgs = @($candidate.PrefixArgs)
                 ExitCode = $LASTEXITCODE
+                Output = @($commandOutput | ForEach-Object { "$_" })
             }
         }
         catch {
@@ -215,6 +217,7 @@ function Invoke-PythonCandidates {
                 Command = $candidate.Command
                 PrefixArgs = @($candidate.PrefixArgs)
                 ExitCode = 1
+                Output = @($_ | Out-String)
             }
         }
     }
@@ -225,6 +228,7 @@ function Invoke-PythonCandidates {
             Command = $null
             PrefixArgs = @()
             ExitCode = 1
+            Output = @()
         }
     }
 
