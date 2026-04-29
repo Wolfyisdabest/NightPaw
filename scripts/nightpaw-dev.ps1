@@ -970,6 +970,26 @@ function Test-RemoteTagExists {
     return (@($result.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0)
 }
 
+function Invoke-ReleasePush {
+    param(
+        [Parameter(Mandatory)][string]$Branch,
+        [Parameter(Mandatory)][string]$Tag
+    )
+
+    $result = Invoke-Git -Arguments @('push', 'origin', $Branch, '--tags') -AllowFailure
+    $combinedOutput = @($result.Output) -join "`n"
+    $tagAvailableOnRemote = Test-RemoteTagExists -Tag $Tag
+    $branchRejected = ($combinedOutput -match [regex]::Escape("$Branch -> $Branch") -and $combinedOutput -match 'rejected')
+
+    return [pscustomobject]@{
+        Succeeded = ($result.ExitCode -eq 0)
+        ExitCode = $result.ExitCode
+        Output = @($result.Output)
+        TagAvailableOnRemote = $tagAvailableOnRemote
+        BranchRejected = $branchRejected
+    }
+}
+
 function Get-ReleaseRangeSpec {
     param(
         [string]$PreviousTag,
@@ -1547,6 +1567,7 @@ function Invoke-ReleaseFlow {
     Write-SuccessLine ("Created annotated tag {0}." -f $analysis.ProposedVersion)
 
     $didPush = $false
+    $tagAvailableOnRemote = $false
     $shouldPush = $PushAfterTag
     if ($analysis.IsDetachedHead) {
         $shouldPush = $false
@@ -1557,9 +1578,24 @@ function Invoke-ReleaseFlow {
     }
 
     if ($shouldPush) {
-        Invoke-Git -Arguments @('push', 'origin', $analysis.Branch, '--tags') | Out-Null
-        $didPush = $true
-        Write-SuccessLine ("Pushed branch {0} and tags to origin." -f $analysis.Branch)
+        $pushResult = Invoke-ReleasePush -Branch $analysis.Branch -Tag $analysis.ProposedVersion
+        $didPush = $pushResult.Succeeded
+        $tagAvailableOnRemote = $pushResult.TagAvailableOnRemote
+
+        if ($pushResult.Succeeded) {
+            Write-SuccessLine ("Pushed branch {0} and tags to origin." -f $analysis.Branch)
+        }
+        else {
+            if ($pushResult.TagAvailableOnRemote) {
+                Write-WarnLine ("Tag {0} is available on origin, but branch {1} was not pushed." -f $analysis.ProposedVersion, $analysis.Branch)
+                if ($pushResult.BranchRejected) {
+                    Write-WarnLine ("Branch {0} was rejected by origin. Pull or rebase, then push the branch separately." -f $analysis.Branch)
+                }
+            }
+            else {
+                throw ("git push origin {0} --tags failed with exit code {1}." -f $analysis.Branch, $pushResult.ExitCode)
+            }
+        }
     }
     else {
         Write-InfoLine 'No push was performed.'
@@ -1574,7 +1610,12 @@ function Invoke-ReleaseFlow {
 
     $shouldCreateGitHubRelease = $false
     if ($CreateReleaseAfterPush) {
-        $shouldCreateGitHubRelease = $true
+        if ($didPush) {
+            $shouldCreateGitHubRelease = $true
+        }
+        elseif ($tagAvailableOnRemote) {
+            Write-WarnLine 'GitHub release creation was skipped because the branch push did not complete.'
+        }
     }
     elseif ($didPush -and (Test-CommandAvailable -Name 'gh')) {
         $shouldCreateGitHubRelease = Confirm-Action -Prompt 'Create GitHub release with gh now? [y/N]'
@@ -1584,13 +1625,6 @@ function Invoke-ReleaseFlow {
     }
 
     if ($shouldCreateGitHubRelease) {
-        if (-not $didPush) {
-            if (-not (Test-RemoteTagExists -Tag $analysis.ProposedVersion)) {
-                Write-WarnLine 'Tag is not available on origin yet, so GitHub release creation was skipped.'
-                return
-            }
-        }
-
         $null = Invoke-GitHubReleaseCreate -Tag $analysis.ProposedVersion -Notes $releaseNotes -UseTagNotesFallback:$UseTagNotesFallback
     }
 }
