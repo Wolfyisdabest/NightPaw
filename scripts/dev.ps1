@@ -4,6 +4,9 @@ param(
     [string]$Message,
     [switch]$Yes,
     [switch]$DryRun,
+    [switch]$Push,
+    [switch]$CreateGitHubRelease,
+    [switch]$UseTagNotes,
     [switch]$VerboseOutput,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArgs
@@ -16,5 +19,5 @@ if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
     throw 'scripts/nightpaw-dev.ps1 was not found.'
 }
 
-& $target @RemainingArgs -Type $Type -Message $Message -Yes:$Yes -DryRun:$DryRun -VerboseOutput:$VerboseOutput
+& $target @RemainingArgs -Type $Type -Message $Message -Yes:$Yes -DryRun:$DryRun -Push:$Push -CreateGitHubRelease:$CreateGitHubRelease -UseTagNotes:$UseTagNotes -VerboseOutput:$VerboseOutput
 exit $LASTEXITCODE

@@ -7,6 +7,9 @@ param(
     [string]$Message,
     [switch]$Yes,
     [switch]$DryRun,
+    [switch]$Push,
+    [switch]$CreateGitHubRelease,
+    [switch]$UseTagNotes,
     [switch]$VerboseOutput,
 
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -37,7 +40,8 @@ $script:ReleaseImportantExact = @(
     'checks.py',
     'pyproject.toml',
     'uv.lock',
-    'README.md'
+    'README.md',
+    'CHANGELOG.md'
 )
 $script:ReleaseImportantPatterns = @(
     'services/*.py',
@@ -254,122 +258,233 @@ function Test-IsReleaseImportantPath {
     return $false
 }
 
-function Get-StatusCategory {
-    param([string]$Line)
+function Get-EmptyTreeHash {
+    return '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+}
 
-    if ($Line -match '^\?\? ') {
-        return 'added'
-    }
-    if ($Line.Length -lt 3) {
-        return 'modified'
+function Convert-ToRepoPath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
     }
 
-    $xy = $Line.Substring(0, 2)
-    $x = $xy[0]
-    $y = $xy[1]
-
-    if ($x -eq 'R' -or $y -eq 'R' -or $Line -match ' -> ') {
-        return 'renamed'
-    }
-    if ($x -eq 'D' -or $y -eq 'D') {
-        return 'deleted'
-    }
-    if ($x -eq 'A' -or $y -eq 'A' -or $x -eq 'C' -or $y -eq 'C') {
-        return 'added'
-    }
-    return 'modified'
+    return ($Path.Trim() -replace '\\', '/')
 }
 
 function Get-StatusPath {
     param([string]$Line)
 
     if ($Line -match '^\?\? (?<path>.+)$') {
-        return $Matches['path'].Trim()
+        return Convert-ToRepoPath -Path $Matches['path']
     }
     if ($Line.Length -ge 4) {
-        return $Line.Substring(3).Trim()
+        return Convert-ToRepoPath -Path $Line.Substring(3)
     }
-    return $Line.Trim()
+    return Convert-ToRepoPath -Path $Line
+}
+
+function Convert-NameStatusLine {
+    param([string]$Line)
+
+    if ([string]::IsNullOrWhiteSpace($Line)) {
+        return $null
+    }
+
+    $parts = $Line -split "`t"
+    if ($parts.Count -lt 2) {
+        return $null
+    }
+
+    $statusCode = $parts[0].Trim()
+    $status = if ($statusCode.Length -gt 0) { $statusCode.Substring(0, 1).ToUpperInvariant() } else { '' }
+    $path = Convert-ToRepoPath -Path $parts[-1]
+    $oldPath = $null
+    $displayPath = $path
+
+    if ($status -eq 'R' -and $parts.Count -ge 3) {
+        $oldPath = Convert-ToRepoPath -Path $parts[1]
+        $path = Convert-ToRepoPath -Path $parts[2]
+        $displayPath = "{0} -> {1}" -f $oldPath, $path
+    }
+
+    return [pscustomobject]@{
+        StatusCode = $statusCode
+        Status = $status
+        Path = $path
+        OldPath = $oldPath
+        DisplayPath = $displayPath
+    }
+}
+
+function Get-UniquePaths {
+    param([string[]]$Paths)
+
+    return @(
+        $Paths |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { Convert-ToRepoPath -Path $_ } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Sort-Object -Unique
+    )
+}
+
+function Get-DirectoryPreviewLines {
+    param(
+        [string[]]$Paths,
+        [int]$PreviewCount = 4
+    )
+
+    $normalized = @(Get-UniquePaths -Paths $Paths)
+    if ($normalized.Count -eq 0) {
+        return @()
+    }
+
+    $groups = [ordered]@{}
+    foreach ($path in $normalized) {
+        $dir = Split-Path -Path $path -Parent
+        if ([string]::IsNullOrWhiteSpace($dir) -or $dir -eq '.') {
+            continue
+        }
+
+        if (-not $groups.Contains($dir)) {
+            $groups[$dir] = New-Object System.Collections.Generic.List[string]
+        }
+        $groups[$dir].Add($path)
+    }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($dir in $groups.Keys | Sort-Object) {
+        $entries = @($groups[$dir] | Sort-Object -Unique)
+        $preview = @($entries | Select-Object -First $PreviewCount | ForEach-Object {
+            [System.IO.Path]::GetFileName($_)
+        })
+
+        if ($entries.Count -eq 0) {
+            continue
+        }
+
+        $line = "{0}/ -> {1}" -f $dir.TrimEnd('/'), ($preview -join ', ')
+        if ($entries.Count -gt $PreviewCount) {
+            $line = "{0} (+{1} more)" -f $line, ($entries.Count - $PreviewCount)
+        }
+        $lines.Add($line)
+    }
+
+    return @($lines)
 }
 
 function Get-GitStatus {
     Assert-GitRepository
-    $statusResult = Invoke-Git -Arguments @('status', '--porcelain')
-    $lines = @($statusResult.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $porcelain = @((Invoke-Git -Arguments @('status', '--porcelain=v1')).Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $unstagedEntries = @((Invoke-Git -Arguments @('diff', '--name-status')).Output | ForEach-Object { Convert-NameStatusLine -Line $_ } | Where-Object { $null -ne $_ })
+    $stagedEntries = @((Invoke-Git -Arguments @('diff', '--cached', '--name-status')).Output | ForEach-Object { Convert-NameStatusLine -Line $_ } | Where-Object { $null -ne $_ })
+    $untracked = @((Invoke-Git -Arguments @('ls-files', '--others', '--exclude-standard')).Output | ForEach-Object { Convert-ToRepoPath -Path $_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 
-    $groups = [ordered]@{
-        modified = New-Object System.Collections.Generic.List[string]
-        added = New-Object System.Collections.Generic.List[string]
-        deleted = New-Object System.Collections.Generic.List[string]
-        renamed = New-Object System.Collections.Generic.List[string]
+    $modified = New-Object System.Collections.Generic.List[string]
+    $staged = New-Object System.Collections.Generic.List[string]
+    $deleted = New-Object System.Collections.Generic.List[string]
+    $renamed = New-Object System.Collections.Generic.List[string]
+
+    foreach ($entry in @($unstagedEntries + $stagedEntries)) {
+        switch ($entry.Status) {
+            'M' { $modified.Add($entry.Path) }
+            'T' { $modified.Add($entry.Path) }
+            'C' { $modified.Add($entry.Path) }
+            'D' { $deleted.Add($entry.DisplayPath) }
+            'R' { $renamed.Add($entry.DisplayPath) }
+            default {
+                if ($entry.Status -notin @('A')) {
+                    $modified.Add($entry.Path)
+                }
+            }
+        }
     }
 
-    foreach ($line in $lines) {
-        $category = Get-StatusCategory -Line $line
+    foreach ($entry in $stagedEntries) {
+        if (-not [string]::IsNullOrWhiteSpace($entry.DisplayPath)) {
+            $staged.Add($entry.DisplayPath)
+        }
+    }
+
+    foreach ($line in $porcelain) {
+        if ($line -match '^\?\? ') {
+            continue
+        }
+
         $path = Get-StatusPath -Line $line
-        $groups[$category].Add($path)
+        if ([string]::IsNullOrWhiteSpace($path)) {
+            continue
+        }
+
+        $xy = if ($line.Length -ge 2) { $line.Substring(0, 2) } else { '  ' }
+        if ($xy -match '[MT]') {
+            $modified.Add($path)
+        }
+        if ($xy -match 'D') {
+            $deleted.Add($path)
+        }
+        if ($xy -match 'R' -or $path -match ' -> ') {
+            $renamed.Add($path)
+        }
     }
 
-    $summary = [ordered]@{
-        modified = $groups.modified.Count
-        added = $groups.added.Count
-        deleted = $groups.deleted.Count
-        renamed = $groups.renamed.Count
-    }
+    $modifiedPaths = @(Get-UniquePaths -Paths $modified)
+    $stagedPaths = @(Get-UniquePaths -Paths $staged)
+    $untrackedPaths = @(Get-UniquePaths -Paths $untracked)
+    $deletedPaths = @(Get-UniquePaths -Paths $deleted)
+    $renamedPaths = @(Get-UniquePaths -Paths $renamed)
+    $commitPreview = @(Get-UniquePaths -Paths @($modifiedPaths + $stagedPaths + $untrackedPaths + $deletedPaths + $renamedPaths))
 
     return [pscustomobject]@{
-        Lines = $lines
-        Groups = $groups
-        Summary = $summary
-        IsClean = ($lines.Count -eq 0)
+        Lines = $porcelain
+        UnstagedEntries = @($unstagedEntries)
+        StagedEntries = @($stagedEntries)
+        Modified = $modifiedPaths
+        Staged = $stagedPaths
+        Untracked = $untrackedPaths
+        Deleted = $deletedPaths
+        Renamed = $renamedPaths
+        DirectoryPreview = @(Get-DirectoryPreviewLines -Paths $untrackedPaths)
+        CommitPreview = $commitPreview
+        Summary = [ordered]@{
+            modified = $modifiedPaths.Count
+            staged = $stagedPaths.Count
+            untracked = $untrackedPaths.Count
+            deleted = $deletedPaths.Count
+            renamed = $renamedPaths.Count
+        }
+        IsClean = ($porcelain.Count -eq 0)
     }
 }
 
 function Get-ChangedFiles {
     $status = Get-GitStatus
-    $allPaths = @(
-        $status.Groups.modified +
-        $status.Groups.added +
-        $status.Groups.deleted +
-        $status.Groups.renamed
-    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique
 
     return [pscustomobject]@{
-        Modified = @($status.Groups.modified)
-        Added = @($status.Groups.added)
-        Deleted = @($status.Groups.deleted)
-        Renamed = @($status.Groups.renamed)
-        All = @($allPaths)
+        Modified = @($status.Modified)
+        Staged = @($status.Staged)
+        Untracked = @($status.Untracked)
+        Deleted = @($status.Deleted)
+        Renamed = @($status.Renamed)
+        DirectoryPreview = @($status.DirectoryPreview)
+        All = @($status.CommitPreview)
     }
 }
 
 function Get-DiffStat {
     Assert-GitRepository
 
-    $repoRoot = Get-RepoRoot
     $hasHead = ((Invoke-Git -Arguments @('rev-parse', '--verify', 'HEAD') -AllowFailure).ExitCode -eq 0)
-    $base = if ($hasHead) { 'HEAD' } else { '4b825dc642cb6eb9a060e54bf8d69288fbee4904' }
+    $base = if ($hasHead) { 'HEAD' } else { Get-EmptyTreeHash }
     $result = Invoke-Git -Arguments @('diff', '--stat', $base, '--')
     $lines = @($result.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 
     $status = Get-GitStatus
-    if ($status.Groups.added.Count -gt 0) {
-        $untrackedNotes = @()
-        foreach ($path in $status.Groups.added) {
-            $fullPath = Join-Path $repoRoot $path
-            if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
-                try {
-                    $lineCount = (Get-Content -LiteralPath $fullPath -ErrorAction Stop | Measure-Object -Line).Lines
-                    $untrackedNotes += "{0} | new file preview: {1} lines" -f $path, $lineCount
-                }
-                catch {
-                    $untrackedNotes += "{0} | new file preview unavailable" -f $path
-                }
-            }
-        }
-        if ($untrackedNotes.Count -gt 0) {
-            $lines += 'Untracked files not shown in git diff stat:'
-            $lines += $untrackedNotes
+    if ($status.Untracked.Count -gt 0) {
+        $lines += 'Untracked files included in status/context but not in git diff --stat:'
+        foreach ($path in $status.Untracked) {
+            $lines += ("  {0}" -f $path)
         }
     }
 
@@ -402,9 +517,9 @@ function Get-SuggestedCommitType {
     }
 
     $normalized = @($ChangedPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.ToLowerInvariant() })
-    $docsOnly = ($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(readme\.md|docs/)' }).Count -eq 0)
+    $docsOnly = ($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(readme\.md|docs/|changelog\.md$)' }).Count -eq 0)
     $testsOnly = ($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(tests/|test_.*\.py$)' }).Count -eq 0)
-    $scriptsOnly = ($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(scripts/|readme\.md|docs/)' }).Count -eq 0)
+    $scriptsOnly = ($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(scripts/|readme\.md|docs/|changelog\.md$)' }).Count -eq 0)
     $ciOnly = ($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(\.github/|github/)' }).Count -eq 0)
     $hasRustHelper = @($normalized | Where-Object {
         $_ -like 'crates/*' -or $_ -eq 'services/rust_bridge.py' -or $_ -eq 'tests/test_rust_bridge.py'
@@ -441,7 +556,7 @@ function Get-SuggestedCommitMessage {
     }).Count -gt 0) {
         return 'add optional Rust-backed service helpers'
     }
-    if (($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(readme\.md|docs/)' }).Count -eq 0)) {
+    if (($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^(readme\.md|docs/|changelog\.md$)' }).Count -eq 0)) {
         return 'update developer documentation'
     }
     if (($normalized.Count -gt 0) -and (@($normalized | Where-Object { $_ -notmatch '^scripts/' }).Count -eq 0)) {
@@ -536,7 +651,8 @@ function Show-ChangedFileGroups {
     Write-Section 'Changed Files'
     foreach ($entry in @(
         @{ Name = 'Modified'; Values = @($ChangedFiles.Modified) }
-        @{ Name = 'Added/Untracked'; Values = @($ChangedFiles.Added) }
+        @{ Name = 'Staged'; Values = @($ChangedFiles.Staged) }
+        @{ Name = 'Untracked'; Values = @($ChangedFiles.Untracked) }
         @{ Name = 'Deleted'; Values = @($ChangedFiles.Deleted) }
         @{ Name = 'Renamed'; Values = @($ChangedFiles.Renamed) }
     )) {
@@ -547,6 +663,23 @@ function Show-ChangedFileGroups {
         }
         foreach ($path in $entry.Values) {
             Write-Host ("  {0}" -f $path) -ForegroundColor Gray
+        }
+    }
+
+    Write-Host 'Commit Preview (all files that would be committed)' -ForegroundColor White
+    if (@($ChangedFiles.All).Count -eq 0) {
+        Write-Host '  (none)' -ForegroundColor DarkGray
+    }
+    else {
+        foreach ($path in @($ChangedFiles.All)) {
+            Write-Host ("  {0}" -f $path) -ForegroundColor Gray
+        }
+    }
+
+    if (@($ChangedFiles.DirectoryPreview).Count -gt 0) {
+        Write-Host 'Untracked Directory Preview' -ForegroundColor White
+        foreach ($line in @($ChangedFiles.DirectoryPreview)) {
+            Write-Host ("  {0}" -f $line) -ForegroundColor DarkGray
         }
     }
 }
@@ -562,9 +695,10 @@ function Show-ProjectStatus {
         Write-SuccessLine 'Working tree is clean.'
     }
     else {
-        Write-InfoLine ("Modified: {0} | Added/Untracked: {1} | Deleted: {2} | Renamed: {3}" -f
+        Write-InfoLine ("Modified: {0} | Staged: {1} | Untracked: {2} | Deleted: {3} | Renamed: {4}" -f
             $status.Summary.modified,
-            $status.Summary.added,
+            $status.Summary.staged,
+            $status.Summary.untracked,
             $status.Summary.deleted,
             $status.Summary.renamed)
     }
@@ -670,9 +804,340 @@ function Get-LatestReachableTag {
     return $tag
 }
 
+function Get-CurrentBranchInfo {
+    $result = Invoke-Git -Arguments @('rev-parse', '--abbrev-ref', 'HEAD')
+    $branch = (($result.Output | Select-Object -First 1) | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($branch)) {
+        throw 'Unable to determine the current branch.'
+    }
+
+    return [pscustomobject]@{
+        Name = $branch
+        IsDetached = ($branch -eq 'HEAD')
+    }
+}
+
+function Test-RemoteTagExists {
+    param([Parameter(Mandatory)][string]$Tag)
+
+    $result = Invoke-Git -Arguments @('ls-remote', '--tags', 'origin', "refs/tags/$Tag") -AllowFailure
+    if ($result.ExitCode -ne 0) {
+        return $false
+    }
+
+    return (@($result.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0)
+}
+
+function Get-ReleaseRangeSpec {
+    param(
+        [string]$PreviousTag,
+        [string]$TargetRef = 'HEAD'
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PreviousTag)) {
+        return $null
+    }
+
+    return "{0}..{1}" -f $PreviousTag, $TargetRef
+}
+
+function Get-ReleaseChangedFiles {
+    param(
+        [string]$PreviousTag,
+        [string]$TargetRef = 'HEAD'
+    )
+
+    $rangeSpec = Get-ReleaseRangeSpec -PreviousTag $PreviousTag -TargetRef $TargetRef
+    $args = if ($rangeSpec) {
+        @('diff', '--name-status', $rangeSpec)
+    }
+    else {
+        @('diff', '--name-status', (Get-EmptyTreeHash), $TargetRef)
+    }
+
+    return @((Invoke-Git -Arguments $args).Output | ForEach-Object { Convert-NameStatusLine -Line $_ } | Where-Object { $null -ne $_ })
+}
+
+function Get-CommitObjectsSinceTag {
+    param(
+        [string]$PreviousTag,
+        [string]$TargetRef = 'HEAD'
+    )
+
+    $rangeSpec = Get-ReleaseRangeSpec -PreviousTag $PreviousTag -TargetRef $TargetRef
+    $args = @('log', '--format=%H%x1f%h%x1f%s%x1f%b%x1e')
+    if ($rangeSpec) {
+        $args += $rangeSpec
+    }
+    else {
+        $args += $TargetRef
+    }
+
+    $raw = ((Invoke-Git -Arguments $args).Output -join "`n")
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return @()
+    }
+
+    $records = @($raw -split [char]0x1e | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $commits = New-Object System.Collections.Generic.List[object]
+    foreach ($record in $records) {
+        $parts = $record.Trim() -split [char]0x1f, 4
+        if ($parts.Count -lt 3) {
+            continue
+        }
+
+        $body = if ($parts.Count -ge 4) { $parts[3].Trim() } else { '' }
+        $subject = $parts[2].Trim()
+        $lineText = "{0} {1}" -f $parts[1].Trim(), $subject
+        $commits.Add([pscustomobject]@{
+            Hash = $parts[0].Trim()
+            ShortHash = $parts[1].Trim()
+            Subject = $subject
+            Body = $body
+            Line = $lineText
+        })
+    }
+
+    return @($commits)
+}
+
+function Get-ReleaseAreaSummary {
+    param([string[]]$Paths)
+
+    $areas = New-Object System.Collections.Generic.List[string]
+    $normalized = @($Paths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+
+    if (@($normalized | Where-Object { $_ -eq 'main.py' -or $_ -eq 'config.py' -or $_ -eq 'checks.py' }).Count -gt 0) {
+        $areas.Add('core runtime')
+    }
+    if (@($normalized | Where-Object { $_ -like 'services/*' }).Count -gt 0) {
+        $areas.Add('services')
+    }
+    if (@($normalized | Where-Object { $_ -like 'cogs/*' }).Count -gt 0) {
+        $areas.Add('cogs')
+    }
+    if (@($normalized | Where-Object { $_ -like 'crates/*' -or $_ -eq 'services/rust_bridge.py' -or $_ -like 'tests/*rust*' }).Count -gt 0) {
+        $areas.Add('Rust helper layer')
+    }
+    if (@($normalized | Where-Object { $_ -eq 'pyproject.toml' -or $_ -eq 'uv.lock' }).Count -gt 0) {
+        $areas.Add('build and dependencies')
+    }
+    if (@($normalized | Where-Object { $_ -eq 'README.md' -or $_ -eq 'CHANGELOG.md' -or $_ -like 'docs/*' }).Count -gt 0) {
+        $areas.Add('documentation')
+    }
+    if (@($normalized | Where-Object { $_ -like 'scripts/*' }).Count -gt 0) {
+        $areas.Add('developer tooling')
+    }
+
+    return @($areas | Select-Object -Unique)
+}
+
+function Get-GroupedReleaseNotes {
+    param(
+        [object[]]$Commits
+    )
+
+    $groups = [ordered]@{
+        Added = New-Object System.Collections.Generic.List[string]
+        Fixed = New-Object System.Collections.Generic.List[string]
+        Changed = New-Object System.Collections.Generic.List[string]
+        Performance = New-Object System.Collections.Generic.List[string]
+        Docs = New-Object System.Collections.Generic.List[string]
+        Build = New-Object System.Collections.Generic.List[string]
+        Tests = New-Object System.Collections.Generic.List[string]
+        Chore = New-Object System.Collections.Generic.List[string]
+        'Breaking Changes' = New-Object System.Collections.Generic.List[string]
+    }
+
+    foreach ($commit in @($Commits)) {
+        $subject = [string]$commit.Subject
+        $body = [string]$commit.Body
+        $line = "- {0} {1}" -f $commit.ShortHash, $subject
+        $isBreaking = ($subject -match '!' -or $subject -match 'breaking:' -or $body -match 'BREAKING CHANGE|breaking:')
+
+        if ($isBreaking) {
+            $groups['Breaking Changes'].Add($line)
+        }
+
+        if ($subject -match '^feat(\(.+\))?!?: ') {
+            $groups.Added.Add($line)
+        }
+        elseif ($subject -match '^fix(\(.+\))?!?: ') {
+            $groups.Fixed.Add($line)
+        }
+        elseif ($subject -match '^perf(\(.+\))?!?: ') {
+            $groups.Performance.Add($line)
+        }
+        elseif ($subject -match '^docs(\(.+\))?!?: ') {
+            $groups.Docs.Add($line)
+        }
+        elseif ($subject -match '^(build|ci)(\(.+\))?!?: ') {
+            $groups.Build.Add($line)
+        }
+        elseif ($subject -match '^test(\(.+\))?!?: ') {
+            $groups.Tests.Add($line)
+        }
+        elseif ($subject -match '^chore(\(.+\))?!?: ') {
+            $groups.Chore.Add($line)
+        }
+        else {
+            $groups.Changed.Add($line)
+        }
+    }
+
+    return $groups
+}
+
+function Format-ReleaseFileLine {
+    param([pscustomobject]$Entry)
+
+    if ($null -eq $Entry) {
+        return $null
+    }
+
+    return "- {0} {1}" -f $Entry.Status, $Entry.DisplayPath
+}
+
+function Get-ReleaseNotesMarkdown {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject]$Analysis,
+        [Parameter(Mandatory)]
+        [string]$NewTag
+    )
+
+    $previousTag = if ($Analysis.LatestTag) { $Analysis.LatestTag } else { 'initial release' }
+    $changedAreas = @(Get-ReleaseAreaSummary -Paths @($Analysis.ReleaseRangePaths + $Analysis.PendingPaths))
+    $grouped = Get-GroupedReleaseNotes -Commits $Analysis.Commits
+    $lines = New-Object System.Collections.Generic.List[string]
+
+    $lines.Add("# $NewTag")
+    $lines.Add('')
+    $lines.Add(("Previous tag: {0}" -f $previousTag))
+    $lines.Add(("New tag: {0}" -f $NewTag))
+    $lines.Add(("Release range: {0}" -f $Analysis.ReleaseRangeLabel))
+
+    if ($changedAreas.Count -gt 0) {
+        $lines.Add('')
+        $lines.Add('## Changed Areas')
+        foreach ($area in $changedAreas) {
+            $lines.Add(("- {0}" -f $area))
+        }
+    }
+
+    $hasGroupedCommits = $false
+    foreach ($groupName in @('Breaking Changes', 'Added', 'Fixed', 'Changed', 'Performance', 'Docs', 'Build', 'Tests', 'Chore')) {
+        $entries = @($grouped[$groupName])
+        if ($entries.Count -gt 0) {
+            $hasGroupedCommits = $true
+            $lines.Add('')
+            $lines.Add(("## {0}" -f $groupName))
+            foreach ($entry in $entries) {
+                $lines.Add($entry)
+            }
+        }
+    }
+
+    if (-not $hasGroupedCommits) {
+        $lines.Add('')
+        $lines.Add('## Changes')
+        if (@($Analysis.Commits).Count -gt 0) {
+            foreach ($commit in @($Analysis.Commits)) {
+                $lines.Add(("- {0}" -f $commit.Line))
+            }
+        }
+        else {
+            $lines.Add('- No commits are in the release range yet.')
+        }
+    }
+
+    $lines.Add('')
+    $lines.Add('## Commits')
+    if (@($Analysis.Commits).Count -eq 0) {
+        $lines.Add('- (none)')
+    }
+    else {
+        foreach ($commit in @($Analysis.Commits)) {
+            $lines.Add(("- {0}" -f $commit.Line))
+        }
+    }
+
+    $lines.Add('')
+    $lines.Add('## Changed Files')
+    if (@($Analysis.ReleaseRangeFiles).Count -eq 0) {
+        $lines.Add('- (none in committed release range)')
+    }
+    else {
+        foreach ($entry in @($Analysis.ReleaseRangeFiles)) {
+            $lines.Add((Format-ReleaseFileLine -Entry $entry))
+        }
+    }
+
+    if (@($Analysis.PendingPaths).Count -gt 0) {
+        $lines.Add('')
+        $lines.Add('## Pending Working Tree Changes')
+        foreach ($path in @($Analysis.PendingPaths)) {
+            $lines.Add(("- {0}" -f $path))
+        }
+    }
+
+    return @($lines)
+}
+
+function Invoke-GitHubReleaseCreate {
+    param(
+        [Parameter(Mandatory)][string]$Tag,
+        [Parameter(Mandatory)][string[]]$Notes,
+        [switch]$UseTagNotesFallback
+    )
+
+    if (-not (Test-CommandAvailable -Name 'gh')) {
+        Write-WarnLine 'GitHub CLI is not available. You can create the GitHub release manually later.'
+        return $false
+    }
+
+    if ($UseTagNotesFallback) {
+        & gh release create $Tag --title $Tag --notes-from-tag
+        if ($LASTEXITCODE -ne 0) {
+            throw "gh release create failed with exit code $LASTEXITCODE."
+        }
+    }
+    else {
+        $notesPath = [System.IO.Path]::GetTempFileName()
+        try {
+            Set-Content -LiteralPath $notesPath -Value $Notes -Encoding UTF8
+            & gh release create $Tag --title $Tag --notes-file $notesPath
+            if ($LASTEXITCODE -ne 0) {
+                throw "gh release create failed with exit code $LASTEXITCODE."
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $notesPath -ErrorAction SilentlyContinue
+        }
+    }
+
+    Write-SuccessLine ("Created GitHub release for {0}." -f $Tag)
+    return $true
+}
+
 function Test-IsSemVerTag {
     param([string]$Tag)
     return ($Tag -match '^v\d+\.\d+\.\d+$')
+}
+
+function Get-ResolvedReleaseBumpType {
+    param([string]$TypeValue)
+
+    if ([string]::IsNullOrWhiteSpace($TypeValue)) {
+        return $null
+    }
+
+    switch ($TypeValue.Trim().ToLowerInvariant()) {
+        'major' { return 'major' }
+        'minor' { return 'minor' }
+        'patch' { return 'patch' }
+        default { return $null }
+    }
 }
 
 function Get-NextVersion {
@@ -707,50 +1172,42 @@ function Get-NextVersion {
 
 function Get-CommitMessagesSinceTag {
     param([string]$LatestTag)
-
-    if ([string]::IsNullOrWhiteSpace($LatestTag)) {
-        $result = Invoke-Git -Arguments @('log', '--pretty=format:%s')
-    }
-    else {
-        $result = Invoke-Git -Arguments @('log', '--pretty=format:%s', "$LatestTag..HEAD")
-    }
-
-    return @($result.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    return @(Get-CommitObjectsSinceTag -PreviousTag $LatestTag | ForEach-Object { $_.Subject })
 }
 
 function Get-CommitsSinceTag {
     param([string]$LatestTag)
-
-    if ([string]::IsNullOrWhiteSpace($LatestTag)) {
-        $result = Invoke-Git -Arguments @('log', '--oneline')
-    }
-    else {
-        $result = Invoke-Git -Arguments @('log', '--oneline', "$LatestTag..HEAD")
-    }
-
-    return @($result.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    return @(Get-CommitObjectsSinceTag -PreviousTag $LatestTag | ForEach-Object { $_.Line })
 }
 
 function Get-ReleaseAnalysis {
+    param([string]$RequestedBumpType)
+
     $latestTag = Get-LatestReachableTag
     if ($null -ne $latestTag -and -not (Test-IsSemVerTag -Tag $latestTag)) {
         throw "Latest tag '$latestTag' is not in vMAJOR.MINOR.PATCH format."
     }
 
+    $branchInfo = Get-CurrentBranchInfo
     $status = Get-GitStatus
     $changed = Get-ChangedFiles
     $recentCommits = Get-RecentCommitSubjects -Count 8
     $workingTreeCommitType = if ($status.IsClean) { $null } else { Get-SuggestedCommitType -ChangedPaths $changed.All -RecentCommitSubjects $recentCommits }
 
-    $commitMessages = Get-CommitMessagesSinceTag -LatestTag $latestTag
-    $commitLines = Get-CommitsSinceTag -LatestTag $latestTag
-    $importantPaths = @($changed.All | Where-Object { Test-IsReleaseImportantPath -Path $_ } | Sort-Object -Unique)
-    $allChangedPaths = @($changed.All)
-    $docsOnlyWorkingTree = ($allChangedPaths.Count -gt 0) -and (@($allChangedPaths | Where-Object { $_ -notmatch '^(README\.md|docs/)' }).Count -eq 0)
+    $commits = @(Get-CommitObjectsSinceTag -PreviousTag $latestTag)
+    $commitMessages = @($commits | ForEach-Object { $_.Subject })
+    $commitLines = @($commits | ForEach-Object { $_.Line })
+    $releaseRangeFiles = @(Get-ReleaseChangedFiles -PreviousTag $latestTag)
+    $releaseRangePaths = @($releaseRangeFiles | ForEach-Object { $_.Path } | Sort-Object -Unique)
+    $pendingPaths = @($changed.All | Sort-Object -Unique)
+    $allChangedPaths = @((@($releaseRangePaths) + @($pendingPaths)) | Sort-Object -Unique)
+    $importantPaths = @($allChangedPaths | Where-Object { Test-IsReleaseImportantPath -Path $_ } | Sort-Object -Unique)
+    $docsOnlyOverall = ($allChangedPaths.Count -gt 0) -and (@($allChangedPaths | Where-Object { $_ -notmatch '^(readme\.md|docs/|changelog\.md$)' }).Count -eq 0)
+    $requestedBump = Get-ResolvedReleaseBumpType -TypeValue $RequestedBumpType
 
-    $hasBreaking = @($commitMessages | Where-Object { $_ -match 'BREAKING CHANGE|breaking:|!:' }).Count -gt 0
-    $hasFeatCommit = @($commitMessages | Where-Object { $_ -match '^feat(\(.+\))?: ' }).Count -gt 0
-    $hasPatchCommit = @($commitMessages | Where-Object { $_ -match '^(fix|perf|refactor|build|test|docs|chore)(\(.+\))?: ' }).Count -gt 0
+    $hasBreaking = @($commits | Where-Object { $_.Subject -match '!' -or $_.Subject -match 'breaking:' -or $_.Body -match 'BREAKING CHANGE|breaking:' }).Count -gt 0
+    $hasFeatCommit = @($commitMessages | Where-Object { $_ -match '^feat(\(.+\))?!?: ' }).Count -gt 0
+    $hasPatchCommit = @($commitMessages | Where-Object { $_ -match '^(fix|perf|refactor|build|test|docs|chore|ci)(\(.+\))?!?: ' }).Count -gt 0
     $releaseNeeded = $false
     $reasons = New-Object System.Collections.Generic.List[string]
 
@@ -766,9 +1223,13 @@ function Get-ReleaseAnalysis {
         $releaseNeeded = $true
         $reasons.Add('current working tree looks like a feature change')
     }
+    if ($pendingPaths.Count -gt 0) {
+        $releaseNeeded = $true
+        $reasons.Add('working tree changes are pending since the latest tag')
+    }
     if ($importantPaths.Count -gt 0) {
         $releaseNeeded = $true
-        $reasons.Add('release-important files changed in the working tree')
+        $reasons.Add('release-important files changed since the latest tag or in the working tree')
     }
     if (@($commitMessages).Count -ge 3) {
         $releaseNeeded = $true
@@ -776,21 +1237,28 @@ function Get-ReleaseAnalysis {
     }
     if ($allChangedPaths.Count -ge 5) {
         $releaseNeeded = $true
-        $reasons.Add('multiple files changed in the working tree')
+        $reasons.Add('multiple files changed since the latest tag')
     }
-    if ($docsOnlyWorkingTree -and @($commitMessages).Count -eq 0) {
+    if ($docsOnlyOverall) {
         $releaseNeeded = $false
         $reasons.Clear()
-        $reasons.Add('docs-only working tree changes do not require a release by default')
+        $reasons.Add('docs-only changes do not require a release by default')
     }
-    if ($status.IsClean -and @($commitMessages).Count -eq 0) {
+    if ($status.IsClean -and @($commitMessages).Count -eq 0 -and $releaseRangeFiles.Count -eq 0) {
         $releaseNeeded = $false
         $reasons.Clear()
         $reasons.Add('no commits or working tree changes since the latest tag')
     }
+    if ($requestedBump) {
+        $releaseNeeded = $true
+        $reasons.Add("release type forced to $requestedBump by -Type")
+    }
 
     $bumpType = 'patch'
-    if ($hasBreaking) {
+    if ($requestedBump) {
+        $bumpType = $requestedBump
+    }
+    elseif ($hasBreaking) {
         $bumpType = 'major'
     }
     elseif ($hasFeatCommit -or $workingTreeCommitType -eq 'feat') {
@@ -805,10 +1273,17 @@ function Get-ReleaseAnalysis {
 
     return [pscustomobject]@{
         LatestTag = $latestTag
+        Branch = $branchInfo.Name
+        IsDetachedHead = $branchInfo.IsDetached
         Status = $status
         Changed = $changed
+        Commits = @($commits)
         CommitMessages = $commitMessages
         CommitLines = $commitLines
+        ReleaseRangeLabel = if ($latestTag) { "$latestTag..HEAD" } else { 'initial release (empty tree..HEAD)' }
+        ReleaseRangeFiles = @($releaseRangeFiles)
+        ReleaseRangePaths = @($releaseRangePaths)
+        PendingPaths = @($pendingPaths)
         WorkingTreeCommitType = $workingTreeCommitType
         ImportantPaths = $importantPaths
         ReleaseRecommended = $releaseNeeded
@@ -821,18 +1296,25 @@ function Get-ReleaseAnalysis {
 function Invoke-ReleaseFlow {
     param(
         [switch]$DryRunMode,
-        [switch]$AssumeYes
-    )
+        [switch]$AssumeYes,
+        [switch]$PushAfterTag,
+        [switch]$CreateReleaseAfterPush,
+        [switch]$UseTagNotesFallback
+)
 
     Assert-GitRepository
-    $analysis = Get-ReleaseAnalysis
+    $analysis = Get-ReleaseAnalysis -RequestedBumpType $Type
 
     Write-Header 'NightPaw Release Helper'
     Write-InfoLine ("Latest tag: {0}" -f $(if ($analysis.LatestTag) { $analysis.LatestTag } else { 'none' }))
+    Write-InfoLine ("Current branch: {0}" -f $analysis.Branch)
     Write-InfoLine ("Working tree clean: {0}" -f $(if ($analysis.Status.IsClean) { 'yes' } else { 'no' }))
     Write-InfoLine ("Release recommended: {0}" -f $(if ($analysis.ReleaseRecommended) { 'yes' } else { 'no' }))
     Write-InfoLine ("Recommended bump: {0}" -f $analysis.BumpType)
     Write-InfoLine ("Proposed version: {0}" -f $analysis.ProposedVersion)
+    if ($analysis.IsDetachedHead) {
+        Write-WarnLine 'Detached HEAD detected. The helper will not push automatically from this state.'
+    }
 
     Write-Section 'Why'
     foreach ($reason in @($analysis.Reasons)) {
@@ -852,11 +1334,44 @@ function Invoke-ReleaseFlow {
         }
     }
 
+    Write-Section 'Changed Files Since Latest Tag'
+    if (@($analysis.ReleaseRangeFiles).Count -eq 0) {
+        Write-InfoLine '(none)'
+    }
+    else {
+        foreach ($entry in @($analysis.ReleaseRangeFiles)) {
+            Write-InfoLine ((Format-ReleaseFileLine -Entry $entry).TrimStart('-', ' '))
+        }
+    }
+
+    if (@($analysis.PendingPaths).Count -gt 0) {
+        Write-Section 'Pending Working Tree Changes'
+        foreach ($path in @($analysis.PendingPaths)) {
+            Write-InfoLine $path
+        }
+    }
+
     Show-ChangedFileGroups -ChangedFiles $analysis.Changed
 
     Write-Section 'Diff Stat'
     foreach ($line in (Get-DiffStat)) {
         Write-InfoLine $line
+    }
+
+    $releaseNotes = Get-ReleaseNotesMarkdown -Analysis $analysis -NewTag $analysis.ProposedVersion
+    $changelogPreview = Get-ChangelogPreview -Analysis $analysis -NewTag $analysis.ProposedVersion
+
+    Write-Section 'Generated Release Notes Preview'
+    foreach ($line in $releaseNotes) {
+        Write-InfoLine $line
+    }
+
+    Write-Section 'CHANGELOG Preview'
+    foreach ($line in $changelogPreview.PreviewLines) {
+        Write-InfoLine $line
+    }
+    if ($changelogPreview.RequiresWrite) {
+        Write-WarnLine 'CHANGELOG.md does not contain this version yet.'
     }
 
     if ($DryRunMode) {
@@ -871,6 +1386,16 @@ function Invoke-ReleaseFlow {
         Write-WarnLine 'Working tree is dirty. Commit or stash changes before creating a real release tag.'
         return
     }
+    if ($changelogPreview.RequiresWrite) {
+        if (-not (Confirm-Action -Prompt ("Write CHANGELOG.md entry for {0}? [y/N]" -f $analysis.ProposedVersion) -AssumeYes:$AssumeYes)) {
+            Write-WarnLine 'Release canceled before CHANGELOG.md update.'
+            return
+        }
+
+        Write-ChangelogFile -ChangelogPath $changelogPreview.Path -ContentLines $changelogPreview.UpdatedContent
+        Write-WarnLine 'CHANGELOG.md was updated. Commit it before or with the release, then rerun the release command.'
+        return
+    }
     if (-not (Confirm-Action -Prompt ("Create annotated tag {0}? [y/N]" -f $analysis.ProposedVersion) -AssumeYes:$AssumeYes)) {
         Write-WarnLine 'Release canceled.'
         return
@@ -878,9 +1403,162 @@ function Invoke-ReleaseFlow {
 
     Invoke-Git -Arguments @('tag', '-a', $analysis.ProposedVersion, '-m', ("NightPaw {0}" -f $analysis.ProposedVersion)) | Out-Null
     Write-SuccessLine ("Created annotated tag {0}." -f $analysis.ProposedVersion)
-    Write-InfoLine 'No push was performed.'
-    Write-InfoLine 'Next manual command:'
-    Write-InfoLine 'git push origin main --tags'
+
+    $didPush = $false
+    $shouldPush = $PushAfterTag
+    if ($analysis.IsDetachedHead) {
+        $shouldPush = $false
+        Write-WarnLine 'Detached HEAD detected. Skipping push.'
+    }
+    elseif (-not $shouldPush) {
+        $shouldPush = Confirm-Action -Prompt 'Push current branch and tags to origin now? [y/N]'
+    }
+
+    if ($shouldPush) {
+        Invoke-Git -Arguments @('push', 'origin', $analysis.Branch, '--tags') | Out-Null
+        $didPush = $true
+        Write-SuccessLine ("Pushed branch {0} and tags to origin." -f $analysis.Branch)
+    }
+    else {
+        Write-InfoLine 'No push was performed.'
+        Write-InfoLine 'Next manual command:'
+        if ($analysis.IsDetachedHead) {
+            Write-InfoLine 'git push origin <branch-name> --tags'
+        }
+        else {
+            Write-InfoLine ("git push origin {0} --tags" -f $analysis.Branch)
+        }
+    }
+
+    $shouldCreateGitHubRelease = $false
+    if ($CreateReleaseAfterPush) {
+        $shouldCreateGitHubRelease = $true
+    }
+    elseif ($didPush -and (Test-CommandAvailable -Name 'gh')) {
+        $shouldCreateGitHubRelease = Confirm-Action -Prompt 'Create GitHub release with gh now? [y/N]'
+    }
+    elseif ($didPush) {
+        Write-WarnLine 'GitHub CLI is not available. You can create the GitHub release manually later.'
+    }
+
+    if ($shouldCreateGitHubRelease) {
+        if (-not $didPush) {
+            if (-not (Test-RemoteTagExists -Tag $analysis.ProposedVersion)) {
+                Write-WarnLine 'Tag is not available on origin yet, so GitHub release creation was skipped.'
+                return
+            }
+        }
+
+        $null = Invoke-GitHubReleaseCreate -Tag $analysis.ProposedVersion -Notes $releaseNotes -UseTagNotesFallback:$UseTagNotesFallback
+    }
+}
+
+function Get-ChangelogPath {
+    return (Join-Path (Get-RepoRoot) 'CHANGELOG.md')
+}
+
+function Get-ChangelogLines {
+    param([string]$ChangelogPath)
+
+    if (Test-Path -LiteralPath $ChangelogPath -PathType Leaf) {
+        return @(Get-Content -LiteralPath $ChangelogPath)
+    }
+
+    return @(
+        '# Changelog',
+        '',
+        'All notable changes to this project will be documented in this file.',
+        ''
+    )
+}
+
+function Test-ChangelogHasVersion {
+    param(
+        [string[]]$Lines,
+        [string]$Version
+    )
+
+    return (@($Lines | Where-Object { $_ -match ("^##\s+{0}\s+-\s+\d{{4}}-\d{{2}}-\d{{2}}$" -f [regex]::Escape($Version)) }).Count -gt 0)
+}
+
+function Get-ChangelogEntryLines {
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Analysis,
+        [Parameter(Mandatory)][string]$NewTag
+    )
+
+    $dateText = Get-Date -Format 'yyyy-MM-dd'
+    $releaseLines = @(Get-ReleaseNotesMarkdown -Analysis $Analysis -NewTag $NewTag)
+    $bodyLines = if ($releaseLines.Count -gt 4) { $releaseLines[4..($releaseLines.Count - 1)] } else { @() }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("## $NewTag - $dateText")
+    $lines.Add('')
+    foreach ($line in $bodyLines) {
+        if ($line -match '^## ') {
+            $lines.Add(($line -replace '^## ', '### '))
+        }
+        else {
+            $lines.Add($line)
+        }
+    }
+    $lines.Add('')
+    return @($lines)
+}
+
+function Get-ChangelogPreview {
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Analysis,
+        [Parameter(Mandatory)][string]$NewTag
+    )
+
+    $path = Get-ChangelogPath
+    $currentLines = @(Get-ChangelogLines -ChangelogPath $path)
+    $hasVersion = Test-ChangelogHasVersion -Lines $currentLines -Version $NewTag
+    $entryLines = @(Get-ChangelogEntryLines -Analysis $Analysis -NewTag $NewTag)
+    $updatedContent = New-Object System.Collections.Generic.List[string]
+
+    if (-not $hasVersion -and $currentLines.Count -ge 4 -and $currentLines[0] -eq '# Changelog') {
+        $updatedContent.Add($currentLines[0])
+        $updatedContent.Add('')
+        $updatedContent.Add($currentLines[2])
+        $updatedContent.Add('')
+        foreach ($line in $entryLines) {
+            $updatedContent.Add($line)
+        }
+        for ($index = 4; $index -lt $currentLines.Count; $index++) {
+            $updatedContent.Add($currentLines[$index])
+        }
+    }
+    else {
+        foreach ($line in $currentLines) {
+            $updatedContent.Add($line)
+        }
+        if (-not $hasVersion) {
+            if ($updatedContent.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($updatedContent[$updatedContent.Count - 1])) {
+                $updatedContent.Add('')
+            }
+            foreach ($line in $entryLines) {
+                $updatedContent.Add($line)
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Path = $path
+        RequiresWrite = (-not $hasVersion)
+        PreviewLines = $entryLines
+        UpdatedContent = @($updatedContent)
+    }
+}
+
+function Write-ChangelogFile {
+    param(
+        [Parameter(Mandatory)][string]$ChangelogPath,
+        [Parameter(Mandatory)][string[]]$ContentLines
+    )
+
+    Set-Content -LiteralPath $ChangelogPath -Value $ContentLines -Encoding UTF8
+    Write-SuccessLine ("Updated {0}" -f (Split-Path -Path $ChangelogPath -Leaf))
 }
 
 function Invoke-TestFlow {
@@ -1008,11 +1686,18 @@ function Show-HelpPanel {
     Write-InfoLine '  .\scripts\nightpaw-dev.ps1 commit -Type feat -Message "add optional Rust-backed service helpers" -Yes'
     Write-InfoLine '  .\scripts\nightpaw-dev.ps1 release -DryRun'
     Write-InfoLine '  .\scripts\nightpaw-dev.ps1 release'
+    Write-InfoLine '  .\scripts\nightpaw-dev.ps1 release -Push'
+    Write-InfoLine '  .\scripts\nightpaw-dev.ps1 release -Push -CreateGitHubRelease'
+    Write-InfoLine '  .\scripts\nightpaw-dev.ps1 release -Push -CreateGitHubRelease -UseTagNotes'
     Write-InfoLine '  .\scripts\nightpaw-dev.ps1 tests'
     Write-InfoLine '  .\scripts\nightpaw-dev.ps1 bot-check'
     Write-InfoLine '  .\scripts\nightpaw-dev.ps1 rust-check'
     Write-Host ''
-    Write-InfoLine 'Flags: -Type -Message -Yes -DryRun -VerboseOutput'
+    Write-InfoLine 'Flags: -Type -Message -Yes -DryRun -Push -CreateGitHubRelease -UseTagNotes -VerboseOutput'
+    Write-InfoLine '-Type can override release bump selection with major, minor, or patch.'
+    Write-InfoLine '-Yes skips the local changelog/tag confirmations only. It does not imply push or GitHub release creation.'
+    Write-InfoLine 'Release previews include grouped notes, commits, changed files, and the CHANGELOG entry.'
+    Write-InfoLine '-UseTagNotes restores gh --notes-from-tag as an explicit fallback.'
     Write-InfoLine 'Legacy-style flags such as --dry-run and --help are also accepted.'
 }
 
@@ -1034,6 +1719,9 @@ function Resolve-CommandArguments {
             '--help' { $resolvedCommand = 'help' }
             '-h' { $resolvedCommand = 'help' }
             '--yes' { $script:Yes = $true }
+            '--push' { $script:Push = $true }
+            '--create-github-release' { $script:CreateGitHubRelease = $true }
+            '--use-tag-notes' { $script:UseTagNotes = $true }
             '--verbose-output' { $script:VerboseOutput = $true }
             default {
                 if ([string]::IsNullOrWhiteSpace($resolvedCommand)) {
@@ -1065,8 +1753,8 @@ function Show-MainMenu {
             '1' { Show-ProjectStatus }
             '2' { Show-CommitContext }
             '3' { Invoke-CommitFlow -CommitType $Type -CommitMessage $Message -AssumeYes:$Yes }
-            '4' { Invoke-ReleaseFlow -DryRunMode -AssumeYes:$Yes }
-            '5' { Invoke-ReleaseFlow -AssumeYes:$Yes }
+            '4' { Invoke-ReleaseFlow -DryRunMode -AssumeYes:$Yes -PushAfterTag:$Push -CreateReleaseAfterPush:$CreateGitHubRelease -UseTagNotesFallback:$UseTagNotes }
+            '5' { Invoke-ReleaseFlow -AssumeYes:$Yes -PushAfterTag:$Push -CreateReleaseAfterPush:$CreateGitHubRelease -UseTagNotesFallback:$UseTagNotes }
             '6' { Invoke-TestFlow }
             '7' { Invoke-BotCheck }
             '8' { Invoke-RustCheck }
@@ -1085,7 +1773,7 @@ try {
             'status' { Show-ProjectStatus; exit 0 }
             'context' { Show-CommitContext; exit 0 }
             'commit' { Invoke-CommitFlow -CommitType $Type -CommitMessage $Message -AssumeYes:$Yes; exit 0 }
-            'release' { Invoke-ReleaseFlow -DryRunMode:$DryRun -AssumeYes:$Yes; exit 0 }
+            'release' { Invoke-ReleaseFlow -DryRunMode:$DryRun -AssumeYes:$Yes -PushAfterTag:$Push -CreateReleaseAfterPush:$CreateGitHubRelease -UseTagNotesFallback:$UseTagNotes; exit 0 }
             'tests' { Invoke-TestFlow; exit 0 }
             'bot-check' { Invoke-BotCheck; exit 0 }
             'rust-check' { Invoke-RustCheck; exit 0 }

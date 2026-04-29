@@ -499,38 +499,57 @@ Release usage:
 ```powershell
 .\scripts\nightpaw-dev.ps1 release -DryRun
 .\scripts\nightpaw-dev.ps1 release
+.\scripts\nightpaw-dev.ps1 release -Push
+.\scripts\nightpaw-dev.ps1 release -Push -CreateGitHubRelease
+.\scripts\nightpaw-dev.ps1 release -Push -CreateGitHubRelease -UseTagNotes
 ```
 
 What it does:
 
 - checks the latest reachable semver tag
-- analyzes commits since that tag plus current working tree changes
+- detects the current branch safely with `git rev-parse --abbrev-ref HEAD`
+- analyzes committed release-range changes with `git diff --name-status <previousTag>..HEAD` and `git log <previousTag>..HEAD`
+- analyzes local working-tree changes with combined git status, staged diff, unstaged diff, and untracked-file sources
 - recommends whether a release is needed
 - recommends a major, minor, or patch bump
+- previews grouped GitHub release notes including commits and changed files
+- previews the `CHANGELOG.md` section that would be written
+- can write `CHANGELOG.md` first and then stop so it can be committed before or with the release
 - creates a local annotated tag only after confirmation or `-Yes`
-- never pushes automatically
-- prints the next manual command when a tag is created
+- asks whether to push the current branch and tags to `origin` after a successful tag
+- can optionally create the GitHub release with `gh` after a successful push
+- generates GitHub release notes from commits since the previous tag by default, with explicit grouped sections plus a full commit list
+- never pushes or creates a GitHub release silently
+- does not auto-push from detached `HEAD`
 - treats docs-only changes as a possible no-release case
 
 Version bump rules:
 
-- `BREAKING CHANGE`, `breaking:`, or `!:` -> major
+- `BREAKING CHANGE`, `breaking:`, or conventional commit `!` markers -> major
 - `feat:` or a feature-shaped working tree -> minor
-- `fix:`, `perf:`, `refactor:`, `build:`, `test:`, `docs:`, `chore:` -> patch
+- `fix:`, `perf:`, `refactor:`, `build:`, `test:`, `docs:`, `chore:`, `ci:` -> patch
+- docs-only changes recommend no release unless you force one with `-Type`
 
 Examples:
 
 ```powershell
 .\scripts\nightpaw-dev.ps1 release -DryRun
 .\scripts\nightpaw-dev.ps1 release
+.\scripts\nightpaw-dev.ps1 release -Push
+.\scripts\nightpaw-dev.ps1 release -Push -CreateGitHubRelease
+.\scripts\nightpaw-dev.ps1 release -Push -CreateGitHubRelease -UseTagNotes
 .\scripts\release.ps1 -DryRun
 ```
 
 Important detail:
 
 - releases are still manual source snapshots and milestones
-- the helper does not push, create a GitHub release, or touch ignored runtime files
-- if a tag is created, the helper prints `git push origin main --tags` as the next manual step
+- `-Yes` skips only local changelog/tag confirmations
+- pushes and GitHub release creation remain explicit through prompts or `-Push` / `-CreateGitHubRelease`
+- release notes include grouped changes, a `Commits` section, and a `Changed Files` section from the real release range
+- `CHANGELOG.md` is maintained by the release helper and must be committed before or with the release when it is newly written
+- release notes are generated from commit history by default, with `-UseTagNotes` available as the fallback path
+- if you skip the push, the helper prints `git push origin <current-branch> --tags` as the next manual step
 
 ## Dev Helper
 
@@ -551,6 +570,13 @@ This opens the unified NightPaw developer console for common local tasks:
 - run tests
 - run a bot syntax/import check
 - run a Rust helper check
+
+Developer-helper behavior:
+
+- local, rule-based only
+- no helper-side AI or Ollama support
+- accurate status/context output for modified, staged, untracked, deleted, and renamed files
+- release previews include commits, changed files, changed areas, and changelog content
 
 Compatibility wrappers still exist:
 

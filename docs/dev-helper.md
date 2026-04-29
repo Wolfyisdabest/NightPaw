@@ -1,12 +1,12 @@
 # NightPaw Unified Developer Helper
 
-NightPaw now uses one main PowerShell entrypoint:
+NightPaw uses one local PowerShell entrypoint:
 
 ```powershell
 .\scripts\nightpaw-dev.ps1
 ```
 
-It replaces the older fragmented helper workflow with one menu-driven developer console plus direct command mode.
+The helper is rule-based only. There is no local AI, Ollama, or suggestion-model path in the developer console anymore.
 
 ## Commands
 
@@ -17,60 +17,114 @@ It replaces the older fragmented helper workflow with one menu-driven developer 
 .\scripts\nightpaw-dev.ps1 commit -Type feat -Message "add optional Rust-backed service helpers" -Yes
 .\scripts\nightpaw-dev.ps1 release -DryRun
 .\scripts\nightpaw-dev.ps1 release
+.\scripts\nightpaw-dev.ps1 release -Type patch
+.\scripts\nightpaw-dev.ps1 release -Push
+.\scripts\nightpaw-dev.ps1 release -Push -CreateGitHubRelease
+.\scripts\nightpaw-dev.ps1 release -Push -CreateGitHubRelease -UseTagNotes
 .\scripts\nightpaw-dev.ps1 tests
 .\scripts\nightpaw-dev.ps1 bot-check
 .\scripts\nightpaw-dev.ps1 rust-check
 ```
 
-It also accepts legacy-style flags such as `--dry-run` and `--help`.
+Legacy-style flags such as `--dry-run`, `--push`, and `--help` are also accepted.
+
+## Status And Commit Context
+
+The helper does not trust `git diff --stat` alone.
+
+It combines:
+
+- `git status --porcelain=v1`
+- `git diff --name-status`
+- `git diff --cached --name-status`
+- `git ls-files --others --exclude-standard`
+
+Status and context output now separates:
+
+- modified tracked files
+- staged files
+- untracked files that are not ignored
+- deleted files
+- renamed files
+
+Commit context also shows:
+
+- every file that would be committed by the helper
+- explicit untracked files
+- a small untracked directory preview when files are clustered inside folders such as `crates/`, `docs/`, `scripts/`, or `tests/`
 
 ## Commit Flow
 
-- shows git status, grouped changed files, and diff stat first
-- suggests a commit type using repo-aware rules
+- shows grouped working-tree status first
+- suggests a commit type from file-based rules
+- includes untracked files in commit-type detection
 - suggests a default subject and lets Enter accept it
-- confirms before staging and committing
-- stages tracked and untracked files with normal git ignore rules
+- stages with `git add --all`
 - never pushes automatically
-
-For the current Rust-helper subsystem work, the helper should suggest:
-
-```text
-feat: add optional Rust-backed service helpers
-```
 
 ## Release Flow
 
-The release helper now treats release creation as a local annotated tag only.
+The release helper uses the latest reachable semver tag plus the current branch name.
 
-- `release -DryRun` analyzes the repo and shows what would happen
-- real `release` asks for confirmation before tagging
-- it never pushes automatically
-- after tagging, it prints the next manual command:
+- branch detection uses `git rev-parse --abbrev-ref HEAD`
+- it never assumes `main`
+- detached `HEAD` is called out and automatic push is skipped
+- `release -DryRun` previews the release analysis without creating a tag
+- real `release` creates only a local annotated tag after confirmation
+- after a local tag, it asks whether to push the current branch and tags to `origin`
+- if `gh` is available after a successful push, it asks whether to create the GitHub release
+- `-Push` and `-CreateGitHubRelease` stay explicit flags
+- `-UseTagNotes` keeps `gh --notes-from-tag` as an explicit fallback only
+- `-Yes` skips local changelog/tag confirmations only; it does not imply push or GitHub release creation
 
-```powershell
-git push origin main --tags
-```
+## Release Analysis Sources
 
-Release recommendations consider the latest semver tag, commits since that tag, current working tree changes, and important paths like `main.py`, `pyproject.toml`, `services/*.py`, `cogs/*.py`, `crates/**`, `README.md`, and `docs/**`.
+Committed release-range data comes from:
 
-Version bump rules:
+- `git diff --name-status <previousTag>..HEAD`
+- `git log <previousTag>..HEAD`
 
-- breaking markers like `BREAKING CHANGE` or `!:` -> major
+That analysis is shown separately from pending working-tree files so the helper does not blur committed release contents with uncommitted local work.
+
+## Release Notes And Changelog
+
+Generated release notes now include:
+
+- grouped commit sections: `Breaking Changes`, `Added`, `Fixed`, `Changed`, `Performance`, `Docs`, `Build`, `Tests`, `Chore`
+- a `Commits` section with `short-hash + subject` for every commit in the release range
+- a `Changed Files` section from the actual release diff range
+- `Changed Areas` derived from important paths
+- a `Pending Working Tree Changes` section in previews when local work is not committed yet
+
+Breaking changes are detected from:
+
+- `BREAKING CHANGE`
+- `breaking:`
+- conventional commit types with `!`
+
+`CHANGELOG.md` is now part of the release flow:
+
+- dry-run previews the exact changelog section that would be added
+- the helper avoids duplicating an existing version section
+- if the version section is missing, the helper can write `CHANGELOG.md`
+- after writing `CHANGELOG.md`, the helper stops and tells you to commit it before or with the release, then rerun release
+
+## Version Bump Rules
+
+- breaking markers -> major
 - `feat` -> minor
-- `fix`, `perf`, `refactor`, `build`, `test`, `docs`, `chore` -> patch
-- docs-only changes can recommend no release
+- `fix`, `perf`, `refactor`, `build`, `test`, `docs`, `chore`, `ci` -> patch
+- docs-only changes recommend no release by default
+- script and helper updates after `v1.1.0` now recommend `v1.1.1` instead of being treated as no-op release noise
 
 ## Checks
 
 `tests`
 
-- runs `uv run pytest` when `tests/` exists and `uv` is available
-- calls out `tests/test_rust_bridge.py` when present
+- runs `uv run python -m pytest` when `tests/` exists and `uv` is available
 
 `bot-check`
 
-- prefers a syntax/import safety pass instead of starting the live Discord bot
 - runs Python `compileall` over `main.py`, `config.py`, `checks.py`, `services`, and `cogs`
 
 `rust-check`
@@ -81,13 +135,9 @@ Version bump rules:
 
 ## Compatibility Wrappers
 
-These older scripts stay in place as thin wrappers:
+These scripts still forward into the unified helper:
 
 - `.\scripts\dev.ps1`
 - `.\scripts\commit.ps1`
 - `.\scripts\commit_context.ps1`
 - `.\scripts\release.ps1`
-
-## Windows Note
-
-If git warns about LF or CRLF line endings on Windows, that is usually harmless. It only becomes a real concern when files were unexpectedly reformatted or noisy line-ending churn appears in the diff.
